@@ -1,0 +1,20 @@
+# Go
+*.exe
+*.test
+dist/
+vendor/
+
+# AWS / Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Env
+.env
+*.env.local
+
+# Editor
+.DS_Store
+.idea/
+.vscode/

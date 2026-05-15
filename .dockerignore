@@ -1,0 +1,7 @@
+.git/
+.terraform/
+*.tfstate
+*.tfstate.backup
+Plans/
+docs/
+*.md

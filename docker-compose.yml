@@ -1,0 +1,47 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs,dynamodb,dynamodbstreams
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep '\"sqs\": \"available\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  terraform:
+    image: hashicorp/terraform:latest
+    working_dir: /terraform
+    volumes:
+      - ./terraform:/terraform:ro
+    command: sh -c "terraform init && terraform apply -auto-approve"
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      localstack:
+        condition: service_healthy
+    restart: on-failure
+
+  processor:
+    build: .
+    command: ["/processor"]
+    volumes:
+      - ./schemas:/schemas:ro
+    environment:
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/events
+      DYNAMODB_EVENTS_TABLE: events
+      DYNAMODB_QUARANTINE_TABLE: quarantined_events
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PROCESSOR_WORKERS: 5
+      SHUTDOWN_GRACE_PERIOD: 30s
+    depends_on:
+      terraform:
+        condition: service_completed_successfully
+    restart: on-failure

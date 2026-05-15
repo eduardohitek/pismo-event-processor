@@ -14,7 +14,6 @@ import (
 	_ "github.com/santhosh-tekuri/jsonschema/v5/httploader"
 )
 
-// ValidationError carries the quarantine reason and diagnostic detail.
 type ValidationError struct {
 	Reason domain.QuarantineReason
 	Detail string
@@ -24,18 +23,15 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Reason, e.Detail)
 }
 
-// Validator validates a raw SQS message body and returns a parsed Event.
 type Validator interface {
-	Validate(raw []byte) (*domain.Event, *ValidationError)
+	Validate(raw []byte) (*domain.Event, error)
 }
 
-// SchemaValidator implements Validator using CloudEvents envelope + JSON Schema payload validation.
 type SchemaValidator struct {
 	schemas map[string]*jsonschema.Schema
 }
 
-// New loads and compiles all *.json schemas from schemasDir.
-// Returns error if schemasDir is unreadable or any schema fails to compile.
+// New compiles all *.json files in schemasDir at startup; fails fast if none are found.
 func New(schemasDir string) (*SchemaValidator, error) {
 	entries, err := os.ReadDir(schemasDir)
 	if err != nil {
@@ -51,7 +47,7 @@ func New(schemasDir string) (*SchemaValidator, error) {
 			continue
 		}
 		absPath := filepath.Join(schemasDir, entry.Name())
-		sch, err := compiler.Compile("file://" + absPath)
+		sch, err := compiler.Compile("file://" + filepath.ToSlash(absPath))
 		if err != nil {
 			return nil, fmt.Errorf("compile schema %s: %w", entry.Name(), err)
 		}
@@ -66,8 +62,7 @@ func New(schemasDir string) (*SchemaValidator, error) {
 	return &SchemaValidator{schemas: schemas}, nil
 }
 
-// Validate parses and validates a raw CloudEvents JSON message.
-func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, *ValidationError) {
+func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, error) {
 	var ce cloudevents.Event
 	if err := json.Unmarshal(raw, &ce); err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidEnvelope, Detail: err.Error()}
@@ -86,8 +81,9 @@ func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, *ValidationError
 		return nil, &ValidationError{Reason: domain.ReasonUnknownEventType, Detail: ce.Type()}
 	}
 
-	var payload interface{}
-	if err := json.Unmarshal(ce.Data(), &payload); err != nil {
+	data := ce.Data()
+	var payload any
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidPayload, Detail: err.Error()}
 	}
 
@@ -104,7 +100,7 @@ func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, *ValidationError
 		SpecVersion:     ce.SpecVersion(),
 		DataContentType: ce.DataContentType(),
 		DataSchema:      ce.DataSchema(),
-		Data:            ce.Data(),
+		Data:            data,
 		ReceivedAt:      time.Now().UTC(),
 	}, nil
 }

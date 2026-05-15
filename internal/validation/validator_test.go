@@ -1,7 +1,7 @@
 package validation
 
 import (
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,6 +25,12 @@ const paymentSchema = `{
   "additionalProperties": false
 }`
 
+const (
+	defaultEventType = "com.pismo.payment.authorized.v1"
+	defaultSource    = "test-source"
+	defaultSubject   = "tenant-123"
+)
+
 func makeValidator(t *testing.T) *SchemaValidator {
 	t.Helper()
 	dir := t.TempDir()
@@ -35,69 +41,32 @@ func makeValidator(t *testing.T) *SchemaValidator {
 	return v
 }
 
-func buildValidCloudEvent(txID string, amount float64, currency string) []byte {
+func mustBuildEvent(id, evtType, subject string, data map[string]any) []byte {
 	e := cloudevents.NewEvent()
-	e.SetID("test-id-001")
-	e.SetSource("test-source")
-	e.SetType("com.pismo.payment.authorized.v1")
-	e.SetSubject("tenant-123")
-	_ = e.SetData("application/json", map[string]interface{}{
+	e.SetID(id)
+	e.SetSource(defaultSource)
+	e.SetType(evtType)
+	e.SetSubject(subject)
+	if err := e.SetData("application/json", data); err != nil {
+		panic("mustBuildEvent SetData: " + err.Error())
+	}
+	b, err := e.MarshalJSON()
+	if err != nil {
+		panic("mustBuildEvent MarshalJSON: " + err.Error())
+	}
+	return b
+}
+
+func validPayload(txID string, amount float64, currency string) map[string]any {
+	return map[string]any{
 		"transaction_id": txID,
 		"amount":         amount,
 		"currency":       currency,
-	})
-	b, _ := json.Marshal(e)
-	return b
+	}
 }
 
 func buildCloudEventWithoutID() []byte {
 	return []byte(`{"specversion":"1.0","type":"com.pismo.payment.authorized.v1","source":"test-source","subject":"tenant-123","datacontenttype":"application/json","data":{"transaction_id":"tx-001","amount":99.90,"currency":"BRL"}}`)
-}
-
-func buildCloudEventWithEmptySubject() []byte {
-	e := cloudevents.NewEvent()
-	e.SetID("test-id-003")
-	e.SetSource("test-source")
-	e.SetType("com.pismo.payment.authorized.v1")
-	e.SetSubject("")
-	_ = e.SetData("application/json", map[string]interface{}{
-		"transaction_id": "tx-003",
-		"amount":         10.0,
-		"currency":       "BRL",
-	})
-	b, _ := json.Marshal(e)
-	return b
-}
-
-func buildCloudEventWithType(eventType string) []byte {
-	e := cloudevents.NewEvent()
-	e.SetID("test-id-004")
-	e.SetSource("test-source")
-	e.SetType(eventType)
-	e.SetSubject("tenant-123")
-	_ = e.SetData("application/json", map[string]interface{}{
-		"transaction_id": "tx-004",
-		"amount":         10.0,
-		"currency":       "BRL",
-	})
-	b, _ := json.Marshal(e)
-	return b
-}
-
-func buildCloudEventWithExtraField() []byte {
-	e := cloudevents.NewEvent()
-	e.SetID("test-id-005")
-	e.SetSource("test-source")
-	e.SetType("com.pismo.payment.authorized.v1")
-	e.SetSubject("tenant-123")
-	_ = e.SetData("application/json", map[string]interface{}{
-		"transaction_id": "tx-005",
-		"amount":         10.0,
-		"currency":       "USD",
-		"extra_field":    "not-allowed",
-	})
-	b, _ := json.Marshal(e)
-	return b
 }
 
 func TestValidate(t *testing.T) {
@@ -109,7 +78,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{
 			name:        "valid event",
-			input:       buildValidCloudEvent("tx-001", 99.90, "BRL"),
+			input:       mustBuildEvent("test-id-001", defaultEventType, defaultSubject, validPayload("tx-001", 99.90, "BRL")),
 			wantEventID: "test-id-001",
 		},
 		{
@@ -124,22 +93,27 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:       "empty subject (tenant)",
-			input:      buildCloudEventWithEmptySubject(),
+			input:      mustBuildEvent("test-id-003", defaultEventType, "", validPayload("tx-003", 10.0, "BRL")),
 			wantReason: domain.ReasonMissingTenant,
 		},
 		{
 			name:       "unknown event type",
-			input:      buildCloudEventWithType("com.pismo.unknown.v99"),
+			input:      mustBuildEvent("test-id-004", "com.pismo.unknown.v99", defaultSubject, validPayload("tx-004", 10.0, "BRL")),
 			wantReason: domain.ReasonUnknownEventType,
 		},
 		{
 			name:       "negative amount",
-			input:      buildValidCloudEvent("tx-002", -1, "BRL"),
+			input:      mustBuildEvent("test-id-002", defaultEventType, defaultSubject, validPayload("tx-002", -1, "BRL")),
 			wantReason: domain.ReasonInvalidPayload,
 		},
 		{
-			name:       "extra field (additionalProperties)",
-			input:      buildCloudEventWithExtraField(),
+			name: "extra field (additionalProperties)",
+			input: mustBuildEvent("test-id-005", defaultEventType, defaultSubject, map[string]any{
+				"transaction_id": "tx-005",
+				"amount":         10.0,
+				"currency":       "USD",
+				"extra_field":    "not-allowed",
+			}),
 			wantReason: domain.ReasonInvalidPayload,
 		},
 	}
@@ -148,18 +122,20 @@ func TestValidate(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			event, valErr := v.Validate(tc.input)
+			event, err := v.Validate(tc.input)
 
 			if tc.wantEventID != "" {
-				require.Nil(t, valErr, "expected no validation error")
+				require.NoError(t, err)
 				require.NotNil(t, event)
 				assert.Equal(t, tc.wantEventID, event.ID)
 				assert.NotEmpty(t, event.TenantID)
 				assert.False(t, event.ReceivedAt.IsZero())
 			} else {
-				require.Nil(t, event, "expected nil event on error")
-				require.NotNil(t, valErr)
-				assert.Equal(t, tc.wantReason, valErr.Reason)
+				require.Nil(t, event)
+				require.Error(t, err)
+				var ve *ValidationError
+				require.True(t, errors.As(err, &ve))
+				assert.Equal(t, tc.wantReason, ve.Reason)
 			}
 		})
 	}

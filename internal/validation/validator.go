@@ -64,11 +64,13 @@ func New(schemasDir string) (*SchemaValidator, error) {
 
 func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, error) {
 	var ce cloudevents.Event
-	if err := json.Unmarshal(raw, &ce); err != nil {
+	err := json.Unmarshal(raw, &ce)
+	if err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidEnvelope, Detail: err.Error()}
 	}
 
-	if err := ce.Validate(); err != nil {
+	err = ce.Validate()
+	if err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidEnvelope, Detail: err.Error()}
 	}
 
@@ -83,11 +85,13 @@ func (sv *SchemaValidator) Validate(raw []byte) (*domain.Event, error) {
 
 	data := ce.Data()
 	var payload any
-	if err := json.Unmarshal(data, &payload); err != nil {
+	err = json.Unmarshal(data, &payload)
+	if err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidPayload, Detail: err.Error()}
 	}
 
-	if err := sch.Validate(payload); err != nil {
+	err = sch.Validate(payload)
+	if err != nil {
 		return nil, &ValidationError{Reason: domain.ReasonInvalidPayload, Detail: err.Error()}
 	}
 

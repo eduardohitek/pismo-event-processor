@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Pismo Event Processor — a Go service that consumes CloudEvents from SQS, validates them against JSON Schema, and persists them to DynamoDB with idempotency guarantees. Built for the Pismo Staff Engineer challenge.
 
 **Module:** `github.com/eduardohitek/pismo-event-processor`  
-**Go version:** 1.22+
+**Go version:** 1.26+
 
 ## Commands
 

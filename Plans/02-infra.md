@@ -21,9 +21,9 @@ scripts/
 
 ### 1. Dockerfile (multi-stage)
 
-**Stage 1** — `golang:1.22-alpine`:
+**Stage 1** — `golang:1.26-alpine`:
 ```dockerfile
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download

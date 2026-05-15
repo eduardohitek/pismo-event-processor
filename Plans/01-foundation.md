@@ -20,7 +20,7 @@ internal/
 ### 1. go.mod
 ```
 module github.com/eduardohitek/pismo-event-processor
-go 1.22
+go 1.26
 ```
 
 ### 2. Dependências (go get)

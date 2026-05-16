@@ -5,12 +5,6 @@ services:
       - "4566:4566"
     environment:
       SERVICES: sqs,dynamodb,dynamodbstreams
-    healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep -q sqs"]
-      interval: 5s
-      timeout: 10s
-      retries: 20
-      start_period: 30s
 
   setup:
     image: amazon/aws-cli:latest
@@ -23,8 +17,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       AWS_ENDPOINT_URL: http://localstack:4566
     depends_on:
-      localstack:
-        condition: service_healthy
+      - localstack
 
   processor:
     build: .

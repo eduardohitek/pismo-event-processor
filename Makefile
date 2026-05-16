@@ -12,6 +12,9 @@ export SQS_QUEUE_URL=http://localhost:4566/000000000000/events
 
 up:
 	docker compose up -d --build
+	@echo ""
+	@echo "Stack status:"
+	@docker compose ps localstack processor
 
 down:
 	docker compose down -v

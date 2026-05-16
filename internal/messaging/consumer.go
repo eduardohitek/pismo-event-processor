@@ -29,8 +29,8 @@ type SQSClient interface {
 }
 
 type SQSConsumer struct {
-	client   SQSClient
-	queueURL *string
+	client    SQSClient
+	queueURL  *string
 	recvInput *sqs.ReceiveMessageInput
 }
 
@@ -56,7 +56,10 @@ func (s *SQSConsumer) Receive(ctx context.Context) ([]Message, error) {
 
 	msgs := make([]Message, 0, len(out.Messages))
 	for _, m := range out.Messages {
-		count, _ := strconv.Atoi(m.Attributes["ApproximateReceiveCount"])
+		count, err := strconv.Atoi(m.Attributes["ApproximateReceiveCount"])
+		if err != nil {
+			return nil, fmt.Errorf("error reading receive count: %w", err)
+		}
 		msgs = append(msgs, Message{
 			ID:            aws.ToString(m.MessageId),
 			Body:          aws.ToString(m.Body),

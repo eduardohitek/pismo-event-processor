@@ -16,9 +16,8 @@ provider "aws" {
   skip_metadata_api_check     = true
   skip_requesting_account_id  = true
   endpoints {
-    sqs             = "http://localstack:4566"
-    dynamodb        = "http://localstack:4566"
-    dynamodbstreams = "http://localstack:4566"
+    sqs      = "http://localstack:4566"
+    dynamodb = "http://localstack:4566"
   }
 }
 

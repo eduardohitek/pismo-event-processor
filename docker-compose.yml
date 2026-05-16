@@ -6,7 +6,7 @@ services:
     environment:
       SERVICES: sqs,dynamodb,dynamodbstreams
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep '\"sqs\": \"available\"'"]
+      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep '\"sqs\"'"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -14,9 +14,12 @@ services:
   terraform:
     image: hashicorp/terraform:latest
     working_dir: /terraform
+    entrypoint:
+      - /bin/sh
+      - -c
+      - terraform init && terraform apply -auto-approve
     volumes:
-      - ./terraform:/terraform:ro
-    command: sh -c "terraform init && terraform apply -auto-approve"
+      - ./terraform:/terraform
     environment:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test

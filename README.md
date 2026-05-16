@@ -72,7 +72,7 @@ PostgreSQL would require schema migration tooling, an explicit idempotency mecha
 
 The `terraform-provider-aws` has a hardcoded propagation waiter for SQS: after `CreateQueue`, it polls `GetQueueAttributes` every 5 seconds for ~25 seconds per queue — a delay designed for real AWS where attribute changes replicate slowly. LocalStack creates resources instantly but the provider ignores that, burning ~50 seconds on polling for two queues alone.
 
-AWS CLI (`scripts/setup.sh`) has no such waiter: all four resources (DLQ, events queue, events table, quarantine table) are created in ~8 seconds. The `terraform/` directory is kept as an IaC reference for the resource schema; it is not used at runtime.
+AWS CLI (`scripts/setup.sh`) has no such waiter: all four resources (DLQ, events queue, events table, quarantine table) are created in ~8 seconds.
 
 *Rejected for local dev:* Terraform — correct tool for production IaC, wrong tool when provider waiters add 7× overhead against an in-process mock.
 
@@ -114,9 +114,8 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 │   └── integration/        # E2E tests (build tag: integration); require make up
 ├── schemas/
 │   └── payloads/           # JSON Schema files, one per event type, named by type string
-├── terraform/              # IaC reference (schema of resources; not used at runtime — see scripts/setup.sh)
 ├── scripts/
-│   └── setup.sh            # AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables (~8s vs ~60s with Terraform)
+│   └── setup.sh            # AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables
 ├── docs/
 │   ├── architecture.md     # Design decisions in depth
 │   ├── resilience.md       # Pipeline failure analysis

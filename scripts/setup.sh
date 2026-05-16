@@ -17,6 +17,12 @@ create_table() {
   echo "  table $name ready"
 }
 
+# Wait until LocalStack is accepting AWS API calls (healthcheck only tests the HTTP
+# health endpoint, which can pass before SQS/DynamoDB are fully ready).
+until aws sqs list-queues > /dev/null 2>&1; do
+  sleep 1
+done
+
 echo "Provisioning LocalStack resources..."
 
 create_queue events-dlq \

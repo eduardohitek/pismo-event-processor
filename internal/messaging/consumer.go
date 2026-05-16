@@ -10,7 +10,6 @@ import (
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-// Message is a provider-neutral representation of a queue message.
 type Message struct {
 	ID            string
 	Body          string
@@ -18,7 +17,6 @@ type Message struct {
 	ReceiveCount  int
 }
 
-// Consumer reads messages from a queue and acknowledges processed ones.
 type Consumer interface {
 	Receive(ctx context.Context) ([]Message, error)
 	Ack(ctx context.Context, msg Message) error
@@ -30,23 +28,28 @@ type SQSClient interface {
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 }
 
-// SQSConsumer implements Consumer against Amazon SQS.
 type SQSConsumer struct {
 	client   SQSClient
-	queueURL string
+	queueURL *string
+	recvInput *sqs.ReceiveMessageInput
 }
 
 func NewSQSConsumer(client SQSClient, queueURL string) *SQSConsumer {
-	return &SQSConsumer{client: client, queueURL: queueURL}
+	qURL := aws.String(queueURL)
+	return &SQSConsumer{
+		client:   client,
+		queueURL: qURL,
+		recvInput: &sqs.ReceiveMessageInput{
+			QueueUrl:            qURL,
+			WaitTimeSeconds:     20,
+			MaxNumberOfMessages: 10,
+			AttributeNames:      []sqstypes.QueueAttributeName{"ApproximateReceiveCount"},
+		},
+	}
 }
 
 func (s *SQSConsumer) Receive(ctx context.Context) ([]Message, error) {
-	out, err := s.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:            aws.String(s.queueURL),
-		WaitTimeSeconds:     20,
-		MaxNumberOfMessages: 10,
-		AttributeNames:      []sqstypes.QueueAttributeName{"ApproximateReceiveCount"},
-	})
+	out, err := s.client.ReceiveMessage(ctx, s.recvInput)
 	if err != nil {
 		return nil, fmt.Errorf("sqs receive: %w", err)
 	}
@@ -66,7 +69,7 @@ func (s *SQSConsumer) Receive(ctx context.Context) ([]Message, error) {
 
 func (s *SQSConsumer) Ack(ctx context.Context, msg Message) error {
 	_, err := s.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(s.queueURL),
+		QueueUrl:      s.queueURL,
 		ReceiptHandle: aws.String(msg.ReceiptHandle),
 	})
 	if err != nil {

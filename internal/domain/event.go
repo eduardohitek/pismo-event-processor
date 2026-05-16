@@ -14,7 +14,7 @@ type Event struct {
 	SpecVersion     string          `json:"specversion"     dynamodbav:"specversion"`
 	DataContentType string          `json:"datacontenttype" dynamodbav:"datacontenttype"`
 	DataSchema      string          `json:"dataschema"      dynamodbav:"dataschema"`
-	Data            json.RawMessage `json:"data"            dynamodbav:"data"`
+	Data            json.RawMessage `json:"data"            dynamodbav:"-"`
 	ReceivedAt      time.Time       `json:"received_at"     dynamodbav:"received_at"`
 }
 

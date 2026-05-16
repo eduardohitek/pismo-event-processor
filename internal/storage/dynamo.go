@@ -16,12 +16,12 @@ import (
 // ErrDuplicate is returned when an event with the same ID already exists.
 var ErrDuplicate = errors.New("duplicate event")
 
-// EventStore persists valid events.
+const conditionNoDuplicate = "attribute_not_exists(id)"
+
 type EventStore interface {
 	Save(ctx context.Context, event *domain.Event) error
 }
 
-// QuarantineStore persists rejected events.
 type QuarantineStore interface {
 	Save(ctx context.Context, q *domain.Quarantined) error
 }
@@ -31,14 +31,18 @@ type DynamoDBClient interface {
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 }
 
-// EventDynamo implements EventStore against DynamoDB.
 type EventDynamo struct {
 	client    DynamoDBClient
-	tableName string
+	tableName *string
+	condition *string
 }
 
 func NewEventStore(client DynamoDBClient, tableName string) *EventDynamo {
-	return &EventDynamo{client: client, tableName: tableName}
+	return &EventDynamo{
+		client:    client,
+		tableName: aws.String(tableName),
+		condition: aws.String(conditionNoDuplicate),
+	}
 }
 
 func (e *EventDynamo) Save(ctx context.Context, event *domain.Event) error {
@@ -46,12 +50,14 @@ func (e *EventDynamo) Save(ctx context.Context, event *domain.Event) error {
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
+	// Data is excluded from auto-marshaling (dynamodbav:"-") because DynamoDB
+	// must store it as String, not Binary. Add it manually here.
 	item["data"] = &types.AttributeValueMemberS{Value: string(event.Data)}
 
 	_, err = e.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName:           aws.String(e.tableName),
+		TableName:           e.tableName,
 		Item:                item,
-		ConditionExpression: aws.String("attribute_not_exists(id)"),
+		ConditionExpression: e.condition,
 	})
 	if err != nil {
 		var cce *types.ConditionalCheckFailedException
@@ -63,14 +69,13 @@ func (e *EventDynamo) Save(ctx context.Context, event *domain.Event) error {
 	return nil
 }
 
-// QuarantineDynamo implements QuarantineStore against DynamoDB.
 type QuarantineDynamo struct {
 	client    DynamoDBClient
-	tableName string
+	tableName *string
 }
 
 func NewQuarantineStore(client DynamoDBClient, tableName string) *QuarantineDynamo {
-	return &QuarantineDynamo{client: client, tableName: tableName}
+	return &QuarantineDynamo{client: client, tableName: aws.String(tableName)}
 }
 
 func (q *QuarantineDynamo) Save(ctx context.Context, quarantined *domain.Quarantined) error {
@@ -84,7 +89,7 @@ func (q *QuarantineDynamo) Save(ctx context.Context, quarantined *domain.Quarant
 	}
 
 	_, err = q.client.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String(q.tableName),
+		TableName: q.tableName,
 		Item:      item,
 	})
 	if err != nil {

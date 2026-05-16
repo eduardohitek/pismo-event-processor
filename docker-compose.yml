@@ -11,23 +11,19 @@ services:
       timeout: 5s
       retries: 10
 
-  terraform:
-    image: hashicorp/terraform:latest
-    working_dir: /terraform
-    entrypoint:
-      - /bin/sh
-      - -c
-      - terraform init && terraform apply -auto-approve
+  setup:
+    image: amazon/aws-cli:latest
+    entrypoint: ["/bin/sh", "/scripts/setup.sh"]
     volumes:
-      - ./terraform:/terraform
+      - ./scripts:/scripts:ro
     environment:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
     depends_on:
       localstack:
         condition: service_healthy
-    restart: on-failure
 
   processor:
     build: .
@@ -45,6 +41,6 @@ services:
       PROCESSOR_WORKERS: 5
       SHUTDOWN_GRACE_PERIOD: 30s
     depends_on:
-      terraform:
+      setup:
         condition: service_completed_successfully
     restart: on-failure

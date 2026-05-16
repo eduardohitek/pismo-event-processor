@@ -73,7 +73,8 @@ func (p *Processor) Run(ctx context.Context) error {
 }
 
 func (p *Processor) ack(ctx context.Context, msg messaging.Message, attrs ...any) {
-	if err := p.cfg.Consumer.Ack(ctx, msg); err != nil {
+	err := p.cfg.Consumer.Ack(ctx, msg)
+	if err != nil {
 		args := append([]any{"message_id", msg.ID, "error", err}, attrs...)
 		p.cfg.Logger.Error("ack failed", args...)
 	}
@@ -95,7 +96,8 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 			Detail:     ve.Detail,
 			RawMessage: raw,
 		}
-		if saveErr := p.cfg.QuarantineStore.Save(ctx, q); saveErr != nil {
+		saveErr := p.cfg.QuarantineStore.Save(ctx, q)
+		if saveErr != nil {
 			p.cfg.Logger.Error("quarantine save failed", "message_id", msg.ID, "error", saveErr)
 		}
 		p.ack(ctx, msg)
@@ -103,7 +105,8 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 		return
 	}
 
-	if saveErr := p.cfg.EventStore.Save(ctx, event); saveErr != nil {
+	saveErr := p.cfg.EventStore.Save(ctx, event)
+	if saveErr != nil {
 		if errors.Is(saveErr, storage.ErrDuplicate) {
 			p.cfg.Logger.Info("duplicate, skipping",
 				"event_id", event.ID, "event_type", event.Type,

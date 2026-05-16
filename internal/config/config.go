@@ -69,7 +69,8 @@ func Load() (*Config, error) {
 }
 
 func getEnvOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	v := os.Getenv(key)
+	if v != "" {
 		return v
 	}
 	return def

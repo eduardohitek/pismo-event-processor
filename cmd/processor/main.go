@@ -68,7 +68,8 @@ func main() {
 	})
 
 	logger.Info("processor starting", "workers", cfg.ProcessorWorkers)
-	if err := proc.Run(ctx); err != nil {
+	err = proc.Run(ctx)
+	if err != nil {
 		logger.Error("processor error", "error", err)
 	}
 

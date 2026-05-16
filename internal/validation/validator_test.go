@@ -47,7 +47,8 @@ func mustBuildEvent(id, evtType, subject string, data map[string]any) []byte {
 	e.SetSource(defaultSource)
 	e.SetType(evtType)
 	e.SetSubject(subject)
-	if err := e.SetData("application/json", data); err != nil {
+	err := e.SetData("application/json", data)
+	if err != nil {
 		panic("mustBuildEvent SetData: " + err.Error())
 	}
 	b, err := e.MarshalJSON()

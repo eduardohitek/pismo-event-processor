@@ -35,10 +35,12 @@ make up && make publish && make inspect
 | `make demo-idempotency` | Publish same event 3× — expect exactly 1 record |
 | `make demo-mixed` | 50 valid + 10 invalid events, randomly shuffled |
 | `make demo-stream` | Continuous 5 msg/s for 30s (visual demo) |
-| `make inspect` | Scan `events` table |
-| `make inspect-quarantine` | Scan `quarantined_events` table |
+| `make inspect` | Scan `events` table (CLI) |
+| `make inspect-quarantine` | Scan `quarantined_events` table (CLI) |
 | `make test` | Unit tests with race detector and coverage |
 | `make test-integration` | E2E tests against running LocalStack (requires `make up`) |
+
+After `make up`, a DynamoDB Admin UI is available at **http://localhost:8001** — browse tables, inspect items, and run queries without the CLI.
 
 ## Why These Choices
 
@@ -120,7 +122,7 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 │   ├── architecture.md     # Design decisions in depth
 │   ├── resilience.md       # Pipeline failure analysis
 │   └── sender-design.md    # Proposed Sender service design (out of scope)
-├── docker-compose.yml      # LocalStack + setup (AWS CLI) + Processor
+├── docker-compose.yml      # LocalStack + setup (AWS CLI) + Processor + DynamoDB Admin UI
 ├── Dockerfile              # Multi-stage: go:1.26-alpine builder → distroless runtime
 └── Makefile                # All operational commands
 ```

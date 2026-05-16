@@ -17,9 +17,15 @@ create_table() {
   echo "  table $name ready"
 }
 
-# Wait until LocalStack is accepting AWS API calls (healthcheck only tests the HTTP
-# health endpoint, which can pass before SQS/DynamoDB are fully ready).
+MAX_RETRIES=60
+echo "Waiting for LocalStack..."
+i=0
 until aws sqs list-queues > /dev/null 2>&1; do
+  i=$((i + 1))
+  if [ "$i" -ge "$MAX_RETRIES" ]; then
+    echo "LocalStack not ready after ${MAX_RETRIES}s, aborting" >&2
+    exit 1
+  fi
   sleep 1
 done
 

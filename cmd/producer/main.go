@@ -193,6 +193,7 @@ func baseEvent(eventType, tenantID string) cloudevents.Event {
 	e.SetSource("producer")
 	e.SetSubject(tenantID)
 	e.SetDataContentType("application/json")
+	e.SetTime(time.Now())
 	return e
 }
 

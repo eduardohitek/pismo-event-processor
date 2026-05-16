@@ -31,6 +31,6 @@ type Quarantined struct {
 	EventID       string           `json:"event_id"      dynamodbav:"event_id"`
 	Reason        QuarantineReason `json:"reason"        dynamodbav:"reason"`
 	Detail        string           `json:"detail"        dynamodbav:"detail"`
-	RawMessage    []byte           `json:"raw_message"   dynamodbav:"raw_message"`
+	RawMessage    string           `json:"raw_message"   dynamodbav:"raw_message"`
 	QuarantinedAt time.Time        `json:"quarantined_at" dynamodbav:"quarantined_at"`
 }

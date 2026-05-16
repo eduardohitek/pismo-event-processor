@@ -81,9 +81,7 @@ func (p *Processor) ack(ctx context.Context, msg messaging.Message, attrs ...any
 }
 
 func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
-	raw := []byte(msg.Body)
-
-	event, err := p.cfg.Validator.Validate(raw)
+	event, err := p.cfg.Validator.Validate([]byte(msg.Body))
 	if err != nil {
 		var ve *validation.ValidationError
 		if !errors.As(err, &ve) {
@@ -94,7 +92,7 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 		q := &domain.Quarantined{
 			Reason:     ve.Reason,
 			Detail:     ve.Detail,
-			RawMessage: raw,
+			RawMessage: msg.Body,
 		}
 		saveErr := p.cfg.QuarantineStore.Save(ctx, q)
 		if saveErr != nil {

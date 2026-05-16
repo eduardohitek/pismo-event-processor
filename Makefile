@@ -14,7 +14,9 @@ up:
 	docker compose up -d --build
 	@echo ""
 	@echo "Stack status:"
-	@docker compose ps localstack processor
+	@docker compose ps localstack processor dynamodb-admin
+	@echo ""
+	@echo "DynamoDB Admin UI: http://localhost:8001"
 
 down:
 	docker compose down -v

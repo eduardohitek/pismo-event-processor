@@ -13,7 +13,6 @@ import (
 	"github.com/eduardohitek/pismo-event-processor/internal/validation"
 )
 
-// Config holds all dependencies for the Processor.
 type Config struct {
 	Consumer        messaging.Consumer
 	Validator       validation.Validator
@@ -61,14 +60,29 @@ func (p *Processor) Run(ctx context.Context) error {
 				continue
 			}
 			for _, msg := range msgs {
-				jobs <- msg
+				select {
+				case jobs <- msg:
+				case <-ctx.Done():
+					close(jobs)
+					wg.Wait()
+					return nil
+				}
 			}
 		}
 	}
 }
 
+func (p *Processor) ack(ctx context.Context, msg messaging.Message, attrs ...any) {
+	if err := p.cfg.Consumer.Ack(ctx, msg); err != nil {
+		args := append([]any{"message_id", msg.ID, "error", err}, attrs...)
+		p.cfg.Logger.Error("ack failed", args...)
+	}
+}
+
 func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
-	event, err := p.cfg.Validator.Validate([]byte(msg.Body))
+	raw := []byte(msg.Body)
+
+	event, err := p.cfg.Validator.Validate(raw)
 	if err != nil {
 		var ve *validation.ValidationError
 		if !errors.As(err, &ve) {
@@ -79,14 +93,12 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 		q := &domain.Quarantined{
 			Reason:     ve.Reason,
 			Detail:     ve.Detail,
-			RawMessage: []byte(msg.Body),
+			RawMessage: raw,
 		}
 		if saveErr := p.cfg.QuarantineStore.Save(ctx, q); saveErr != nil {
 			p.cfg.Logger.Error("quarantine save failed", "message_id", msg.ID, "error", saveErr)
 		}
-		if ackErr := p.cfg.Consumer.Ack(ctx, msg); ackErr != nil {
-			p.cfg.Logger.Error("ack failed", "message_id", msg.ID, "error", ackErr)
-		}
+		p.ack(ctx, msg)
 		p.cfg.Logger.Warn("quarantined", "message_id", msg.ID, "reason", ve.Reason, "detail", ve.Detail)
 		return
 	}
@@ -96,9 +108,7 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 			p.cfg.Logger.Info("duplicate, skipping",
 				"event_id", event.ID, "event_type", event.Type,
 				"tenant_id", event.TenantID, "message_id", msg.ID)
-			if ackErr := p.cfg.Consumer.Ack(ctx, msg); ackErr != nil {
-				p.cfg.Logger.Error("ack failed", "message_id", msg.ID, "error", ackErr)
-			}
+			p.ack(ctx, msg)
 			return
 		}
 		// Transient error — do NOT ack; SQS will redeliver after VisibilityTimeout.
@@ -108,12 +118,7 @@ func (p *Processor) handle(ctx context.Context, msg messaging.Message) {
 		return
 	}
 
-	if ackErr := p.cfg.Consumer.Ack(ctx, msg); ackErr != nil {
-		p.cfg.Logger.Error("ack failed",
-			"event_id", event.ID, "event_type", event.Type,
-			"tenant_id", event.TenantID, "message_id", msg.ID, "error", ackErr)
-		return
-	}
+	p.ack(ctx, msg, "event_id", event.ID, "event_type", event.Type, "tenant_id", event.TenantID)
 	p.cfg.Logger.Info("event processed",
 		"event_id", event.ID, "event_type", event.Type,
 		"tenant_id", event.TenantID, "message_id", msg.ID)

@@ -138,62 +138,34 @@ func TestHandleValidEvent(t *testing.T) {
 	assert.Empty(t, quarantineStore.quarantined)
 }
 
-func TestHandleMalformedEnvelope(t *testing.T) {
-	consumer := &fakeConsumer{}
-	eventStore := &fakeEventStore{}
-	quarantineStore := &fakeQuarantineStore{}
-	ve := &validation.ValidationError{Reason: domain.ReasonInvalidEnvelope, Detail: "bad json"}
+func TestHandleQuarantineReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason domain.QuarantineReason
+		detail string
+	}{
+		{"malformed envelope", domain.ReasonInvalidEnvelope, "bad json"},
+		{"invalid payload", domain.ReasonInvalidPayload, "schema mismatch"},
+		{"unknown event type", domain.ReasonUnknownEventType, "com.unknown.v1"},
+		{"missing tenant", domain.ReasonMissingTenant, "subject empty"},
+	}
 
-	proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
-	proc.handle(context.Background(), testMsg("rh-1"))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			consumer := &fakeConsumer{}
+			eventStore := &fakeEventStore{}
+			quarantineStore := &fakeQuarantineStore{}
+			ve := &validation.ValidationError{Reason: tc.reason, Detail: tc.detail}
 
-	assert.Empty(t, eventStore.saved)
-	require.Len(t, quarantineStore.quarantined, 1)
-	assert.Equal(t, domain.ReasonInvalidEnvelope, quarantineStore.quarantined[0].Reason)
-	require.Len(t, consumer.ackCalls, 1)
-}
+			proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
+			proc.handle(context.Background(), testMsg("rh-1"))
 
-func TestHandleInvalidPayload(t *testing.T) {
-	consumer := &fakeConsumer{}
-	eventStore := &fakeEventStore{}
-	quarantineStore := &fakeQuarantineStore{}
-	ve := &validation.ValidationError{Reason: domain.ReasonInvalidPayload, Detail: "schema mismatch"}
-
-	proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
-	proc.handle(context.Background(), testMsg("rh-1"))
-
-	assert.Empty(t, eventStore.saved)
-	require.Len(t, quarantineStore.quarantined, 1)
-	assert.Equal(t, domain.ReasonInvalidPayload, quarantineStore.quarantined[0].Reason)
-	require.Len(t, consumer.ackCalls, 1)
-}
-
-func TestHandleUnknownEventType(t *testing.T) {
-	consumer := &fakeConsumer{}
-	eventStore := &fakeEventStore{}
-	quarantineStore := &fakeQuarantineStore{}
-	ve := &validation.ValidationError{Reason: domain.ReasonUnknownEventType, Detail: "com.unknown.v1"}
-
-	proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
-	proc.handle(context.Background(), testMsg("rh-1"))
-
-	require.Len(t, quarantineStore.quarantined, 1)
-	assert.Equal(t, domain.ReasonUnknownEventType, quarantineStore.quarantined[0].Reason)
-	require.Len(t, consumer.ackCalls, 1)
-}
-
-func TestHandleMissingTenant(t *testing.T) {
-	consumer := &fakeConsumer{}
-	eventStore := &fakeEventStore{}
-	quarantineStore := &fakeQuarantineStore{}
-	ve := &validation.ValidationError{Reason: domain.ReasonMissingTenant, Detail: "subject empty"}
-
-	proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
-	proc.handle(context.Background(), testMsg("rh-1"))
-
-	require.Len(t, quarantineStore.quarantined, 1)
-	assert.Equal(t, domain.ReasonMissingTenant, quarantineStore.quarantined[0].Reason)
-	require.Len(t, consumer.ackCalls, 1)
+			assert.Empty(t, eventStore.saved)
+			require.Len(t, quarantineStore.quarantined, 1)
+			assert.Equal(t, tc.reason, quarantineStore.quarantined[0].Reason)
+			require.Len(t, consumer.ackCalls, 1)
+		})
+	}
 }
 
 func TestHandleDuplicate(t *testing.T) {

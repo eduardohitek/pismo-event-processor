@@ -14,6 +14,7 @@ type Config struct {
 	DynamoDBQuarantineTable string
 	AWSRegion               string
 	AWSEndpointURL          string
+	SchemasDir              string
 	ProcessorWorkers        int
 	ShutdownGracePeriod     time.Duration
 }
@@ -25,6 +26,7 @@ func Load() (*Config, error) {
 		SQSQueueURL:             os.Getenv("SQS_QUEUE_URL"),
 		DynamoDBEventsTable:     os.Getenv("DYNAMODB_EVENTS_TABLE"),
 		DynamoDBQuarantineTable: os.Getenv("DYNAMODB_QUARANTINE_TABLE"),
+		SchemasDir:              getEnvOrDefault("SCHEMAS_DIR", "/schemas/payloads"),
 	}
 
 	var errs []error

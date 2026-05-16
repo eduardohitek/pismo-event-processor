@@ -49,11 +49,7 @@ func main() {
 	sqsClient := sqs.NewFromConfig(awsCfg, sqsOpts...)
 	dynamoClient := dynamodb.NewFromConfig(awsCfg, dynamoOpts...)
 
-	schemasDir := "/schemas/payloads"
-	if d := os.Getenv("SCHEMAS_DIR"); d != "" {
-		schemasDir = d
-	}
-	validator, err := validation.New(schemasDir)
+	validator, err := validation.New(cfg.SchemasDir)
 	if err != nil {
 		log.Fatal("failed to load schemas:", err)
 	}

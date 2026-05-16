@@ -24,6 +24,7 @@ import (
 const (
 	eventsTable     = "events"
 	quarantineTable = "quarantined_events"
+	knownEventType  = "com.pismo.payment.authorized.v1"
 )
 
 var (
@@ -175,7 +176,7 @@ func extractField(items []map[string]types.AttributeValue, field string) []strin
 func buildValidCloudEvent(id, tenantID string) cloudevents.Event {
 	e := cloudevents.NewEvent()
 	e.SetID(id)
-	e.SetType("com.pismo.payment.authorized.v1")
+	e.SetType(knownEventType)
 	e.SetSource("integration-test")
 	e.SetSubject(tenantID)
 	e.SetDataContentType("application/json")
@@ -187,47 +188,39 @@ func buildValidCloudEvent(id, tenantID string) cloudevents.Event {
 	return e
 }
 
+// baseEvent builds and marshals a CloudEvent with the common envelope fields.
+// Pass an empty id to omit SetID (triggers invalid_envelope on the processor).
+func baseEvent(id, eventType string, payload map[string]any) []byte {
+	e := cloudevents.NewEvent()
+	if id != "" {
+		e.SetID(id)
+	}
+	e.SetType(eventType)
+	e.SetSource("integration-test")
+	e.SetSubject("tenant-001")
+	e.SetDataContentType("application/json")
+	_ = e.SetData("application/json", payload)
+	return marshal(e)
+}
+
 func buildInvalidEvent(idx int) []byte {
 	switch idx % 4 {
-	case 0:
+	case 0: // invalid JSON
 		return []byte("{not-valid-json}")
-	case 1:
-		e := cloudevents.NewEvent()
-		e.SetType("com.pismo.payment.authorized.v1")
-		e.SetSource("integration-test")
-		e.SetSubject("tenant-001")
-		e.SetDataContentType("application/json")
-		_ = e.SetData("application/json", map[string]any{
+	case 1: // missing required id field
+		return baseEvent("", knownEventType, map[string]any{
 			"transaction_id": ulid.Make().String(),
 			"amount":         10.0,
 			"currency":       "BRL",
 		})
-		b, _ := json.Marshal(e)
-		return b
-	case 2:
-		e := cloudevents.NewEvent()
-		e.SetID(ulid.Make().String())
-		e.SetType("com.pismo.unknown.type")
-		e.SetSource("integration-test")
-		e.SetSubject("tenant-001")
-		e.SetDataContentType("application/json")
-		_ = e.SetData("application/json", map[string]any{"foo": "bar"})
-		b, _ := json.Marshal(e)
-		return b
+	case 2: // unknown event type
+		return baseEvent(ulid.Make().String(), "com.pismo.unknown.v99", map[string]any{"foo": "bar"})
 	default: // invalid payload: amount violates exclusiveMinimum: 0
-		e := cloudevents.NewEvent()
-		e.SetID(ulid.Make().String())
-		e.SetType("com.pismo.payment.authorized.v1")
-		e.SetSource("integration-test")
-		e.SetSubject("tenant-001")
-		e.SetDataContentType("application/json")
-		_ = e.SetData("application/json", map[string]any{
+		return baseEvent(ulid.Make().String(), knownEventType, map[string]any{
 			"transaction_id": ulid.Make().String(),
 			"amount":         -1,
 			"currency":       "BRL",
 		})
-		b, _ := json.Marshal(e)
-		return b
 	}
 }
 
@@ -278,12 +271,17 @@ func TestIdempotency(t *testing.T) {
 	publishEvent(t, body)
 	publishEvent(t, body)
 
-	// Allow time for all 3 messages to be consumed before asserting.
-	time.Sleep(2 * time.Second)
-
+	// Wait for the first message to be persisted.
 	eventuallyAssert(t, func() bool {
-		return countRecords(t, eventsTable) == 1
-	}, 15*time.Second, "exactly 1 record despite 3 publishes")
+		return countRecords(t, eventsTable) >= 1
+	}, 10*time.Second, "first event should be persisted")
+
+	// Settle: allow the remaining two duplicate messages to be consumed and
+	// rejected before asserting the final count. Without this window,
+	// eventuallyAssert could succeed on the first record before the duplicates
+	// are processed, giving a false-positive pass on the idempotency guarantee.
+	time.Sleep(3 * time.Second)
+	assert.Equal(t, 1, countRecords(t, eventsTable), "exactly 1 record despite 3 publishes")
 }
 
 func TestMultiTenancy(t *testing.T) {
@@ -306,7 +304,7 @@ func TestMultiTenancy(t *testing.T) {
 func TestMixedValidInvalid(t *testing.T) {
 	clearTables(t)
 
-	for i := range 5 {
+	for range 5 {
 		publishEvent(t, marshal(buildValidCloudEvent(ulid.Make().String(), "tenant-001")))
 	}
 	for i := range 3 {

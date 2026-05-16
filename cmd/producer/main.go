@@ -10,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/oklog/ulid/v2"
@@ -81,14 +81,16 @@ Scenarios (--scenario):
 
 func runDefault(ctx context.Context, client *sqs.Client, queueURL string, count, invalidCount int) {
 	for i := range count {
-		if err := publish(ctx, client, queueURL, buildValidEventBytes("", tenants[i%len(tenants)])); err != nil {
+		err := publish(ctx, client, queueURL, buildValidEventBytes("", tenants[i%len(tenants)]))
+		if err != nil {
 			log.Printf("publish valid[%d] failed: %v", i, err)
 			continue
 		}
 		fmt.Printf("published valid event %d/%d\n", i+1, count)
 	}
 	for i := range invalidCount {
-		if err := publish(ctx, client, queueURL, buildInvalidEventBytes(i)); err != nil {
+		err := publish(ctx, client, queueURL, buildInvalidEventBytes(i))
+		if err != nil {
 			log.Printf("publish invalid[%d] failed: %v", i, err)
 			continue
 		}
@@ -102,7 +104,8 @@ func runScenario(ctx context.Context, client *sqs.Client, queueURL, name string)
 	case "idempotency":
 		fixedID := ulid.Make().String()
 		for i := range 3 {
-			if err := publish(ctx, client, queueURL, buildValidEventBytes(fixedID, tenants[0])); err != nil {
+			err := publish(ctx, client, queueURL, buildValidEventBytes(fixedID, tenants[0]))
+			if err != nil {
 				log.Printf("publish[%d] failed: %v", i, err)
 			}
 		}

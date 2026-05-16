@@ -1,6 +1,6 @@
 # Pismo Event Processor
 
-A Go service that consumes CloudEvents from Amazon SQS, validates them against per-type JSON Schema contracts, and persists valid events to DynamoDB with idempotency guarantees. Invalid events are quarantined with structured failure reasons. Built as a reference implementation for the Pismo Staff Engineer challenge.
+A Go service that consumes CloudEvents from Amazon SQS, validates them against per-type JSON Schema contracts, triages them by routing rules, and persists valid events to DynamoDB with idempotency guarantees. Invalid or unroutable events are quarantined with structured failure reasons. Built as a reference implementation for the Pismo Staff Engineer challenge.
 
 ## Architecture
 
@@ -10,7 +10,9 @@ Producer ──► SQS Queue ──► Processor ──► DynamoDB (events)
                 └─► DLQ (after 5 failures)
 ```
 
-The processor runs N parallel workers (default: 5). Each worker receives a message, validates the CloudEvent envelope and payload, and routes based on the result: valid events are persisted and acked; invalid events are quarantined and acked; transient storage errors are not acked (SQS redelivers after `VisibilityTimeout=30s`).
+**Pipeline per message:** `Receive → Validate → Triage → Persist`
+
+The processor runs N parallel workers (default: 5). Each worker receives a message, validates the CloudEvent envelope and payload, triages it against routing rules, and persists to DynamoDB. Validation failures and triage failures are quarantined and acked; transient storage errors are not acked (SQS redelivers after `VisibilityTimeout=30s`).
 
 ## Quick Start
 
@@ -88,6 +90,7 @@ AWS CLI (`scripts/setup.sh`) has no such waiter: all four resources (DLQ, events
 | DynamoDB transient error | Message not acked — SQS redelivers; DLQ after 5 failures | No permanent loss within retention window |
 | Duplicate delivery | `attribute_not_exists(id)` — returns `ErrDuplicate`, acked without re-saving | Exactly-once persistence despite at-least-once transport |
 | Invalid envelope (deterministic) | Quarantined + acked | No retry; failure is permanent |
+| Unregistered tenant or no routing rule | Quarantined + acked | No retry; failure is permanent |
 | Ack fails after successful save | Message redelivered; duplicate conditional write rejected | Idempotency absorbs the redundant message |
 
 ## Schema Versioning
@@ -99,6 +102,18 @@ Event types follow the convention `com.<org>.<domain>.<event>.<vN>`:
 
 Each version maps to a separate JSON Schema file in `schemas/payloads/`. The processor loads all files at startup. New versions are deployed by adding a schema file without modifying existing ones. Old schema files remain active until all producers have migrated, allowing parallel versions in production.
 
+## Routing Configuration
+
+Triage rules live in `config/routing.yaml` and are loaded at startup. The file defines:
+
+- **`rules`**: ordered list of matchers; first match wins. `match.type` is an exact event type or a glob suffix ending in `.*` (e.g. `com.pismo.monitoring.*` matches any event type starting with `com.pismo.monitoring.`).
+- **`default`**: fallback route applied when no rule matches. If absent, events with no matching rule are quarantined with reason `no_routing_rule`.
+- **`registered_tenants`**: allowlist of valid tenant IDs. Events from tenants not in this list are quarantined with reason `unregistered_tenant`.
+
+Each matched event is enriched with three DynamoDB attributes: `routing_target` (the tenant ID), `routing_category`, and `routing_priority`. The Sender service reads these fields from DynamoDB Streams to route events to their destinations without re-evaluating rules.
+
+To add support for a new event type or tenant, update `config/routing.yaml` and redeploy. No code change required.
+
 ## Project Layout
 
 ```
@@ -107,15 +122,18 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 │   └── producer/           # Test tool: publishes valid and invalid events to SQS
 ├── internal/
 │   ├── config/             # Env-var loading; all environment config in one place
-│   ├── domain/             # Pure types: Event, Quarantined, QuarantineReason
+│   ├── domain/             # Pure types: Event, Routing, Quarantined, QuarantineReason
 │   ├── messaging/          # Consumer interface + SQSConsumer (long-poll, ack)
 │   ├── validation/         # Validator interface + SchemaValidator (CloudEvents + JSON Schema)
+│   ├── triage/             # RuleBasedTriager: loads routing.yaml, routes events by type + tenant
 │   ├── storage/            # EventStore + QuarantineStore interfaces + DynamoDB impls
-│   └── processor/          # Orchestrates receive→validate→persist; N workers, graceful shutdown
+│   └── processor/          # Orchestrates receive→validate→triage→persist; N workers, graceful shutdown
 ├── test/
 │   └── integration/        # E2E tests (build tag: integration); require make up
 ├── schemas/
 │   └── payloads/           # JSON Schema files, one per event type, named by type string
+├── config/
+│   └── routing.yaml        # Triage rules: type matchers, category/priority, registered tenants
 ├── scripts/
 │   └── setup.sh            # AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables
 ├── docs/
@@ -135,7 +153,9 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 
 **Outbox pattern for producer:** In production, the publisher would use an outbox table in its own database to guarantee exactly-once publishing, decoupling event creation from SQS delivery.
 
-**Observability:** Structured JSON logs are already in place. Next: Prometheus counters (`events_processed_total`, `events_quarantined_total`), latency histograms, and OpenTelemetry traces for end-to-end pipeline visibility.
+**Dynamic routing rules:** Current rules are static YAML loaded at startup. A future evolution could support hot reload (INOTIFY watch or config server) or a rule expression engine for complex predicates (e.g. amount-based routing).
+
+**Observability:** Structured JSON logs are already in place with `stage` field per pipeline step. Next: Prometheus counters (`events_processed_total`, `events_quarantined_total`), latency histograms, and OpenTelemetry traces for end-to-end pipeline visibility.
 
 ## Evaluation Criteria
 

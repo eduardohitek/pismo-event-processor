@@ -197,7 +197,7 @@ func baseEvent(id, eventType string, payload map[string]any) []byte {
 	}
 	e.SetType(eventType)
 	e.SetSource("integration-test")
-	e.SetSubject("tenant-001")
+	e.SetSubject("tenant-A")
 	e.SetDataContentType("application/json")
 	_ = e.SetData("application/json", payload)
 	return marshal(e)
@@ -237,7 +237,7 @@ func marshal(e cloudevents.Event) []byte {
 func TestHappyPath(t *testing.T) {
 	clearTables(t)
 
-	event := buildValidCloudEvent(ulid.Make().String(), "tenant-001")
+	event := buildValidCloudEvent(ulid.Make().String(), "tenant-A")
 	publishEvent(t, marshal(event))
 
 	eventuallyAssert(t, func() bool {
@@ -265,7 +265,7 @@ func TestIdempotency(t *testing.T) {
 	clearTables(t)
 
 	fixedID := ulid.Make().String()
-	body := marshal(buildValidCloudEvent(fixedID, "tenant-001"))
+	body := marshal(buildValidCloudEvent(fixedID, "tenant-A"))
 
 	publishEvent(t, body)
 	publishEvent(t, body)
@@ -277,9 +277,7 @@ func TestIdempotency(t *testing.T) {
 	}, 10*time.Second, "first event should be persisted")
 
 	// Settle: allow the remaining two duplicate messages to be consumed and
-	// rejected before asserting the final count. Without this window,
-	// eventuallyAssert could succeed on the first record before the duplicates
-	// are processed, giving a false-positive pass on the idempotency guarantee.
+	// rejected before asserting the final count.
 	time.Sleep(3 * time.Second)
 	assert.Equal(t, 1, countRecords(t, eventsTable), "exactly 1 record despite 3 publishes")
 }
@@ -287,7 +285,7 @@ func TestIdempotency(t *testing.T) {
 func TestMultiTenancy(t *testing.T) {
 	clearTables(t)
 
-	tenants := []string{"tenant-001", "tenant-002", "tenant-003"}
+	tenants := []string{"tenant-A", "tenant-B", "tenant-C"}
 	for _, tenant := range tenants {
 		publishEvent(t, marshal(buildValidCloudEvent(ulid.Make().String(), tenant)))
 	}
@@ -305,7 +303,7 @@ func TestMixedValidInvalid(t *testing.T) {
 	clearTables(t)
 
 	for range 5 {
-		publishEvent(t, marshal(buildValidCloudEvent(ulid.Make().String(), "tenant-001")))
+		publishEvent(t, marshal(buildValidCloudEvent(ulid.Make().String(), "tenant-A")))
 	}
 	for i := range 3 {
 		publishEvent(t, buildInvalidEvent(i))
@@ -314,4 +312,56 @@ func TestMixedValidInvalid(t *testing.T) {
 	eventuallyAssert(t, func() bool {
 		return countRecords(t, eventsTable) == 5 && countRecords(t, quarantineTable) == 3
 	}, 20*time.Second, "5 valid + 3 quarantined")
+}
+
+func TestTriageQuarantine(t *testing.T) {
+	clearTables(t)
+
+	// Publish a structurally valid event with an unregistered tenant.
+	e := cloudevents.NewEvent()
+	e.SetID(ulid.Make().String())
+	e.SetType(knownEventType)
+	e.SetSource("integration-test")
+	e.SetSubject("tenant-unknown")
+	e.SetDataContentType("application/json")
+	_ = e.SetData("application/json", map[string]any{
+		"transaction_id": ulid.Make().String(),
+		"amount":         10.0,
+		"currency":       "BRL",
+	})
+	publishEvent(t, marshal(e))
+
+	eventuallyAssert(t, func() bool {
+		return countRecords(t, quarantineTable) == 1
+	}, 10*time.Second, "unregistered tenant should be quarantined")
+
+	item := getQuarantinedItem(t)
+	assert.Equal(t, "unregistered_tenant", item["reason"])
+	assert.Equal(t, 0, countRecords(t, eventsTable))
+}
+
+func TestRoutingPopulated(t *testing.T) {
+	clearTables(t)
+
+	publishEvent(t, marshal(buildValidCloudEvent(ulid.Make().String(), "tenant-A")))
+
+	eventuallyAssert(t, func() bool {
+		return countRecords(t, eventsTable) == 1
+	}, 10*time.Second, "event should be persisted with routing fields")
+
+	items := scanTable(t, eventsTable)
+	require := assert.New(t)
+	item := items[0]
+
+	routingTarget, _ := item["routing_target"].(*types.AttributeValueMemberS)
+	routingCategory, _ := item["routing_category"].(*types.AttributeValueMemberS)
+	routingPriority, _ := item["routing_priority"].(*types.AttributeValueMemberN)
+
+	require.NotNil(routingTarget, "routing_target should be present")
+	require.NotNil(routingCategory, "routing_category should be present")
+	require.NotNil(routingPriority, "routing_priority should be present")
+
+	assert.Equal(t, "tenant-A", routingTarget.Value)
+	assert.Equal(t, "transactional", routingCategory.Value)
+	assert.Equal(t, "1", routingPriority.Value)
 }

@@ -31,12 +31,16 @@ Estas decisões foram debatidas e definidas — **não revisitar sem motivo fort
 
 ### 2.2 Modelo de dados no DynamoDB
 
-**Tabela `events`** (eventos válidos persistidos):
+**Tabela `events`** (eventos válidos e triados, persistidos):
 - Primary Key: `id` (String) — `event_id` do CloudEvent, ULID
 - **Justificativa**: distribui uniformemente, idempotência trivial via `attribute_not_exists(id)`
 - **Trade-off aceito**: sem ordering por tenant. Aceitável para o case; em produção com ordering requirement, mudaria para `PK=tenant_id, SK=event_id`
 - Stream: `NEW_IMAGE`
 - Billing: `PAY_PER_REQUEST` (on-demand)
+- **Atributos de routing** (preenchidos pela etapa de triagem):
+  - `routing_target` (String) — client de destino
+  - `routing_category` (String) — categoria (`transactional`, `security`, `observability`, etc.)
+  - `routing_priority` (Number) — 1 (alta) a 3 (baixa)
 
 **Tabela `quarantined_events`** (eventos rejeitados deterministicamente):
 - Primary Key: `event_id` (String) — pode ser vazio se envelope era unparseable, então usar fallback de `ulid.Make()` quando ausente
@@ -46,11 +50,14 @@ Estas decisões foram debatidas e definidas — **não revisitar sem motivo fort
 
 **At-least-once delivery + idempotent consumer**. "Exactly-once" não é prometido nem perseguido.
 
+Pipeline: **Receive → Validate → Triage → Persist**
+
 Política de erro no consumer:
 
 | Tipo de falha | Ação |
 |---|---|
-| Validação falhou (determinístico) | Persiste em `quarantined_events` + Ack |
+| Validação falhou (envelope, payload, tenant ausente) | Persiste em `quarantined_events` + Ack |
+| Triagem falhou (tenant não registrado, sem regra de routing) | Persiste em `quarantined_events` + Ack |
 | Persistência: `ConditionalCheckFailedException` | Log como duplicata + Ack (idempotência funcionando) |
 | Persistência: erro transiente | **Não acka** — SQS reentrega, DLQ pega após `maxReceiveCount: 5` |
 | `Ack` falhou | Log — mensagem volta, idempotência absorve |
@@ -72,6 +79,55 @@ Mapeamento de atributos CloudEvents → domínio:
 - `type` → event type identifier (com versão embutida: `com.pismo.payment.authorized.v1`)
 - `source` → producer identification
 - `data` → payload validado pelo schema específico do `type`
+
+### 2.4.1 Triagem
+
+O enunciado cita explicitamente **"validating, and triaging these events for delivery to various targets"** — triagem é etapa distinta de validação e persistência.
+
+**Definição operacional**: triagem é o ato de transformar metadata do envelope em **routing intent explícito** que o Sender consome. Sem triagem, o Sender precisaria reinterpretar tenant + type a cada entrega; com triagem, o evento persistido já carrega seu destino, categoria e prioridade.
+
+**Implementação minimalista**:
+- Interface `Triager` com método `Route(evt *domain.Event) (*domain.Routing, error)`
+- Implementação `RuleBasedTriager` que carrega regras de `config/routing.yaml` no startup
+- `Routing` é struct com 3 campos: `TargetClient`, `Category`, `Priority`
+- Regra é match por `type` (exato ou glob simples como `com.pismo.monitoring.*`) + lookup de tenant válido
+- Default rule para tipos sem match explícito
+- Falhas de triagem (tenant não registrado, sem rule e sem default) → quarentena com reason específica
+
+**Formato do `config/routing.yaml`**:
+
+```yaml
+rules:
+  - match:
+      type: "com.pismo.payment.authorized.v1"
+    route:
+      category: "transactional"
+      priority: 1
+
+  - match:
+      type: "com.pismo.monitoring.*"
+    route:
+      category: "observability"
+      priority: 3
+
+default:
+  category: "uncategorized"
+  priority: 2
+
+registered_tenants:
+  - tenant-acme
+  - tenant-globex
+  - tenant-initech
+```
+
+`target_client` é derivado diretamente do `tenant_id` no caso simples; `registered_tenants` é a allowlist usada para rejeitar tenants desconhecidos.
+
+**O que NÃO incluir na triagem**:
+- Hot reload (regras carregadas só no startup, mudança requer redeploy)
+- Avaliador de expressões complexas (sem DSL, sem regras tipo "amount > 10000")
+- Fan-out 1:N (cada evento tem 1 routing — multi-destinatário fica para o Sender ou evolução futura)
+- Reordenação por prioridade no Processor (campo `priority` é metadata pro Sender; Processor não reordena)
+
 
 ### 2.5 Escopo
 
@@ -99,17 +155,20 @@ event-processor/
 │   └── producer/           # main.go do producer simulado
 ├── internal/
 │   ├── config/             # carregamento de env vars
-│   ├── domain/             # tipos puros: Event, Quarantined, QuarantineReason
+│   ├── domain/             # tipos puros: Event, Routing, Quarantined, QuarantineReason
 │   ├── messaging/          # interface Consumer + impl SQS
 │   ├── validation/         # CloudEvents + JSON Schema
+│   ├── triage/             # interface Triager + impl RuleBased
 │   ├── storage/            # interface EventStore + impl DynamoDB
-│   └── processor/          # orquestração receive→validate→persist
+│   └── processor/          # orquestração receive→validate→triage→persist
 ├── test/
 │   └── integration/        # testes e2e com build tag `integration`
 ├── schemas/
 │   ├── cloudevents.json    # opcional, para referência
 │   └── payloads/
 │       └── com.pismo.payment.authorized.v1.json
+├── config/
+│   └── routing.yaml        # regras de triagem (versionado no repo)
 ├── terraform/
 │   ├── main.tf
 │   ├── variables.tf
@@ -150,6 +209,7 @@ github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue // marshal helper
 github.com/cloudevents/sdk-go/v2                             // CloudEvents
 github.com/santhosh-tekuri/jsonschema/v5                     // JSON Schema validator
 github.com/oklog/ulid/v2                                     // ULID para event_id
+gopkg.in/yaml.v3                                             // parser de routing.yaml
 github.com/stretchr/testify                                  // assertions em testes (apenas)
 ```
 
@@ -167,9 +227,10 @@ github.com/stretchr/testify                                  // assertions em te
 ### 5.1 Domínio
 
 `internal/domain/event.go` define:
-- `Event` struct com todos os campos extraídos do CloudEvent (id, source, type, tenant_id, time, spec_version, data_content_type, data_schema, data como `json.RawMessage`, received_at)
+- `Event` struct com todos os campos extraídos do CloudEvent (id, source, type, tenant_id, time, spec_version, data_content_type, data_schema, data como `json.RawMessage`, received_at) **+ campo `Routing *Routing`** preenchido após a etapa de triagem
+- `Routing` struct (target_client, category, priority)
 - `Quarantined` struct (event_id opcional, reason, detail, raw_message, quarantined_at)
-- `QuarantineReason` como string type com constantes: `invalid_envelope`, `unknown_event_type`, `invalid_payload`, `missing_tenant`
+- `QuarantineReason` como string type com constantes: `invalid_envelope`, `unknown_event_type`, `invalid_payload`, `missing_tenant`, `unregistered_tenant`, `no_routing_rule`
 
 ### 5.2 Validação
 
@@ -181,6 +242,27 @@ github.com/stretchr/testify                                  // assertions em te
   - Indexa por nome do arquivo sem extensão (`com.pismo.payment.authorized.v1.json` → key `com.pismo.payment.authorized.v1`)
 - `ValidationError` carrega `Reason` (domain.QuarantineReason) + `Detail` para routing correto pelo orquestrador
 - Falha em carregar schemas no startup = panic/return error (fail fast)
+
+### 5.2.1 Triagem
+
+`internal/triage/triager.go`:
+- Interface `Triager` com `Route(evt *domain.Event) (*domain.Routing, *TriageError)`
+- `TriageError` carrega `Reason` (domain.QuarantineReason) + `Detail`, análogo ao `ValidationError`
+- Implementação `RuleBasedTriager` que:
+  - Carrega regras de `config/routing.yaml` no startup (path configurável via env var `ROUTING_CONFIG`)
+  - Mantém map de tenants registrados (allowlist)
+  - Mantém slice ordenado de regras: cada uma tem matcher por `type` (exato ou glob simples com `*` no final)
+  - Tem default rule opcional aplicada quando nenhuma regra explícita casa
+- Estratégia de routing:
+  1. Se `event.TenantID` não está em `registered_tenants` → `TriageError{Reason: ReasonUnregisteredTenant}`
+  2. Procura primeira regra cujo type matcher case com `event.Type`
+  3. Se encontra → retorna `Routing{TargetClient: event.TenantID, Category: rule.Category, Priority: rule.Priority}`
+  4. Se não encontra e default está definido → retorna routing com category/priority default
+  5. Se não encontra e default não está definido → `TriageError{Reason: ReasonNoRoutingRule}`
+- Type matcher é função simples — sem regex completo, sem DSL. Match exato OU prefixo terminado em `.*` (ex: `com.pismo.monitoring.*` casa `com.pismo.monitoring.heartbeat.v1`)
+- YAML parser: usar `gopkg.in/yaml.v3` (adicionar como dependência)
+
+Teste unitário: table-driven cobrindo match exato, match por glob, fallback para default, tenant desconhecido, type sem regra e sem default.
 
 ### 5.3 Messaging
 
@@ -202,12 +284,18 @@ github.com/stretchr/testify                                  // assertions em te
 ### 5.5 Processor
 
 `internal/processor/processor.go`:
-- Construtor recebe `Config` com as 4 dependências (Consumer, Validator, EventStore, QuarantineStore) + Logger + Workers
+- Construtor recebe `Config` com as 5 dependências (Consumer, Validator, **Triager**, EventStore, QuarantineStore) + Logger + Workers
 - `Run(ctx)` faz:
   1. Spawna N workers consumindo de um channel `jobs`
   2. Loop principal chama `Receive` e empurra para `jobs`
   3. Em `ctx.Done()`, fecha `jobs` e espera workers (graceful shutdown)
-- `handle(msg)` é onde a política de erro vive — implementa a tabela da seção 2.3
+- `handle(msg)` implementa o pipeline na ordem correta: **Validate → Triage → Persist**
+  - Validate falhou → quarentena + Ack
+  - Triage falhou → quarentena + Ack (com reason de triagem)
+  - Triage ok → enriquece `evt.Routing` com o resultado
+  - Persist falhou (transiente) → não acka
+  - Persist duplicata → log + Ack
+  - Persist ok → Ack
 - Cada Receive tem sub-context com timeout de 25s (menor que long poll de 20s + folga) para não travar shutdown
 
 ### 5.6 Cmd/processor
@@ -326,11 +414,16 @@ Apontar para >70% de cobertura nas packages do `internal/`. Não buscar 100% —
 
 ### 7.3 Casos críticos para cobrir explicitamente
 
-- Mensagem válida → persistida + acked
-- Envelope malformado → quarentena + acked
-- Payload inválido → quarentena + acked
-- Tipo desconhecido → quarentena + acked
-- Tenant ausente → quarentena + acked
+- Mensagem válida → triada → persistida + acked (com routing populado)
+- Envelope malformado → quarentena com `invalid_envelope` + acked
+- Payload inválido → quarentena com `invalid_payload` + acked
+- Tipo desconhecido (sem schema) → quarentena com `unknown_event_type` + acked
+- Tenant ausente no envelope → quarentena com `missing_tenant` + acked
+- Tenant não registrado na config de routing → quarentena com `unregistered_tenant` + acked
+- Type válido mas sem regra de routing (e sem default) → quarentena com `no_routing_rule` + acked
+- Triagem aplica regra exata corretamente (e.g. `com.pismo.payment.authorized.v1` → categoria `transactional`, prioridade 1)
+- Triagem aplica regra por glob (e.g. `com.pismo.monitoring.*` casa `com.pismo.monitoring.heartbeat.v1`)
+- Triagem cai no default quando configurado e nenhum match explícito
 - Duplicata → log de duplicata + acked (não re-salva)
 - Erro transiente no DynamoDB → **NÃO acka** (invariante crítica)
 - Shutdown gracioso com mensagens in-flight
@@ -349,11 +442,13 @@ Criar `test/integration/e2e_test.go` com build tag `integration` — protege con
 
 **Casos a cobrir:**
 
-1. **Happy path**: publica 1 evento válido → eventualmente aparece em `events`, não aparece em `quarantined_events`
-2. **Quarentena**: publica 1 evento com envelope malformado → eventualmente aparece em `quarantined_events` com `reason=invalid_envelope`
-3. **Idempotência**: publica o mesmo evento (mesmo `id`) 3 vezes → após processamento, há exatamente 1 registro em `events`
-4. **Multi-tenancy**: publica eventos para 3 tenants diferentes → todos os 3 aparecem em `events` com `tenant_id` correto
-5. **Mix válido/inválido**: publica 5 válidos e 3 inválidos → exatamente 5 em `events` e 3 em `quarantined_events`
+1. **Happy path**: publica 1 evento válido → eventualmente aparece em `events` com `routing_*` populado, não aparece em `quarantined_events`
+2. **Quarentena por envelope**: publica 1 evento com envelope malformado → eventualmente aparece em `quarantined_events` com `reason=invalid_envelope`
+3. **Quarentena por triagem**: publica 1 evento válido com tenant não registrado → eventualmente aparece em `quarantined_events` com `reason=unregistered_tenant`
+4. **Idempotência**: publica o mesmo evento (mesmo `id`) 3 vezes → após processamento, há exatamente 1 registro em `events`
+5. **Multi-tenancy**: publica eventos para 3 tenants registrados → todos os 3 aparecem em `events` com `tenant_id` correto e `routing_target` igual
+6. **Mix válido/inválido**: publica 5 válidos e 3 inválidos → exatamente 5 em `events` e 3 em `quarantined_events`
+7. **Triagem por categoria**: publica eventos de tipos diferentes → cada um persistido com `routing_category` e `routing_priority` corretos segundo `config/routing.yaml`
 
 **Helper de cleanup**: antes de cada teste, fazer scan + delete em ambas as tabelas para garantir estado limpo. Idealmente em um `TestMain` que prepara/limpa o ambiente, e helpers `clearTables(t)` chamados em cada teste.
 
@@ -368,15 +463,17 @@ Criar `test/integration/e2e_test.go` com build tag `integration` — protege con
 Estrutura obrigatória:
 
 1. **Título + descrição em 1 parágrafo**
-2. **Diagrama da arquitetura** em ASCII art
+2. **Diagrama da arquitetura** em ASCII art (mostrando explicitamente Receive → Validate → **Triage** → Persist)
 3. **Quick start** — 3 a 5 comandos para subir tudo
 4. **Como rodar/inspecionar/parar**
 5. **Why these choices** — seção explicando trade-offs (CloudEvents, JSON Schema, SQS, DynamoDB), incluindo alternativas consideradas e por que foram rejeitadas
-6. **Resilience model** — tabela de cenários de falha → mitigação
-7. **Schema versioning** — convenção `vN` no event type
-8. **Project layout** — árvore comentada
-9. **Future evolution** — mencionar Sender via Streams, Schema Registry, Outbox no producer (mostra visão sem implementar)
-10. **Evaluation criteria mapping** — tabela conectando os 6 critérios oficiais a partes específicas do projeto
+6. **Pipeline stages** — explicação de cada etapa, com destaque para triagem como camada distinta que transforma metadata em routing intent explícito para o Sender
+7. **Resilience model** — tabela de cenários de falha → mitigação
+8. **Schema versioning** — convenção `vN` no event type
+9. **Routing configuration** — formato do `config/routing.yaml`, como adicionar novas regras, como funciona o fallback default
+10. **Project layout** — árvore comentada
+11. **Future evolution** — mencionar Sender via Streams, Schema Registry, Outbox no producer, motor de regras dinâmico para triagem (mostra visão sem implementar)
+12. **Evaluation criteria mapping** — tabela conectando os 6 critérios oficiais a partes específicas do projeto
 
 Tom: profissional, denso, sem hype. Escrever em inglês (Pismo é internacional). Cada decisão tem racional.
 
@@ -411,17 +508,18 @@ Design proposto do Sender (out of scope, mas demonstra ciclo arquitetural fechad
 
 A entrega está pronta quando:
 
-1. ✅ `git clone && make up && make publish && make inspect` mostra eventos persistidos no DynamoDB sem erro
+1. ✅ `git clone && make up && make publish && make inspect` mostra eventos persistidos no DynamoDB sem erro, **com atributos `routing_target`, `routing_category` e `routing_priority` populados**
 2. ✅ Publicar evento inválido aparece em `quarantined_events`, não em `events`
-3. ✅ `make demo-idempotency` resulta em 1 registro em `events` mesmo com 3 publicações
-4. ✅ Matar o processor (SIGTERM) durante processamento não perde mensagens — após restart, mensagens em flight são reprocessadas
-5. ✅ `make test` passa com >70% cobertura no `internal/`
-6. ✅ `make test-integration` passa com ambiente do `make up` rodando
-7. ✅ README contém todas as seções da 8.1, sem erros de inglês ou ambiguidades
-8. ✅ Sem TODO ou comentários de FIXME no código entregue
-9. ✅ `go vet ./...` e `gofmt -l .` retornam vazio
-10. ✅ Logs do processor são JSON estruturado, parseáveis
-11. ✅ Avaliador da Pismo consegue rodar o projeto seguindo apenas o README, em ambiente macOS limpo com Docker, em menos de 5 minutos
+3. ✅ Publicar evento com tenant não registrado em `config/routing.yaml` aparece em `quarantined_events` com `reason=unregistered_tenant`
+4. ✅ `make demo-idempotency` resulta em 1 registro em `events` mesmo com 3 publicações
+5. ✅ Matar o processor (SIGTERM) durante processamento não perde mensagens — após restart, mensagens em flight são reprocessadas
+6. ✅ `make test` passa com >70% cobertura no `internal/`
+7. ✅ `make test-integration` passa com ambiente do `make up` rodando
+8. ✅ README contém todas as seções da 8.1, sem erros de inglês ou ambiguidades, **incluindo explicação clara do que é triagem e como ela funciona**
+9. ✅ Sem TODO ou comentários de FIXME no código entregue
+10. ✅ `go vet ./...` e `gofmt -l .` retornam vazio
+11. ✅ Logs do processor são JSON estruturado, parseáveis, **com etapa explícita no log (`stage: validate|triage|persist`)**
+12. ✅ Avaliador da Pismo consegue rodar o projeto seguindo apenas o README, em ambiente macOS limpo com Docker, em menos de 5 minutos
 
 ---
 
@@ -429,22 +527,23 @@ A entrega está pronta quando:
 
 Para o Claude Code, sugerir ao final do plano esta ordem (vertical slices, valor incremental):
 
-1. **Fundação**: `go.mod`, estrutura de pastas, `domain/event.go`
+1. **Fundação**: `go.mod`, estrutura de pastas, `domain/event.go` (incluindo `Routing`)
 2. **Validação**: `validation/validator.go` + testes (sem AWS ainda — totalmente unit-testável)
 3. **Schemas**: `schemas/payloads/com.pismo.payment.authorized.v1.json`
-4. **Storage**: `storage/dynamo.go` com interface limpa
-5. **Messaging**: `messaging/consumer.go`
-6. **Processor**: `processor/processor.go` + testes com fakes
-7. **Wiring**: `cmd/processor/main.go`
-8. **Producer básico**: `cmd/producer/main.go` com `--count` e `--invalid`
-9. **Config**: `config/config.go` (extrair do main quando der trabalho)
-10. **Infra**: `docker-compose.yml`, `Dockerfile`, `terraform/`
-11. **Makefile** (alvos básicos: up, down, test, publish, inspect)
-12. **Validação end-to-end manual** — confirmar que `make up && make publish && make inspect` funciona
-13. **Producer estendido**: cenários `--scenario` (idempotency, mixed-load, duplicate-burst) e modo `--rate`
-14. **Makefile**: alvos `demo-*` e `test-integration`
-15. **Testes de integração**: `test/integration/e2e_test.go` com helper `eventuallyAssert`
-16. **Docs**: README + docs/*.md por último, com o sistema funcionando à mão
+4. **Triagem**: `triage/triager.go` + `config/routing.yaml` + testes unit
+5. **Storage**: `storage/dynamo.go` com interface limpa (atributos de routing incluídos)
+6. **Messaging**: `messaging/consumer.go`
+7. **Processor**: `processor/processor.go` (pipeline Validate→Triage→Persist) + testes com fakes
+8. **Wiring**: `cmd/processor/main.go`
+9. **Producer básico**: `cmd/producer/main.go` com `--count` e `--invalid` (incluindo casos que disparam quarentena de triagem)
+10. **Config**: `config/config.go` (extrair do main quando der trabalho)
+11. **Infra**: `docker-compose.yml`, `Dockerfile`, `terraform/`
+12. **Makefile** (alvos básicos: up, down, test, publish, inspect)
+13. **Validação end-to-end manual** — confirmar que `make up && make publish && make inspect` funciona com routing populado
+14. **Producer estendido**: cenários `--scenario` (idempotency, mixed-load, duplicate-burst) e modo `--rate`
+15. **Makefile**: alvos `demo-*` e `test-integration`
+16. **Testes de integração**: `test/integration/e2e_test.go` com helper `eventuallyAssert`
+17. **Docs**: README + docs/*.md por último, com o sistema funcionando à mão
 
 Cada etapa deve compilar e (quando aplicável) ter testes passando antes de avançar.
 
@@ -464,6 +563,9 @@ Para não desviar:
 - ❌ **Não** adicionar Helm charts, Kubernetes manifests — case é local
 - ❌ **Não** usar AWS reais — LocalStack é suficiente e barato
 - ❌ **Não** construir ferramenta de load test / benchmark separada — performance não está nos critérios de avaliação e benchmark contra LocalStack é meaningless. O modo `--rate` do producer é demo visual, não benchmark.
+- ❌ **Não** construir motor de regras genérico para triagem — match exato no `type` ou glob simples com `.*` no final basta. Sem DSL, sem evaluador de expressões, sem operadores em payload.
+- ❌ **Não** suportar fan-out na triagem (1 evento → N destinos) — cada evento tem 1 routing. Multi-destinatário é responsabilidade do Sender ou de evolução futura.
+- ❌ **Não** implementar hot reload de regras de routing — carregadas só no startup, mudança requer redeploy.
 
 ---
 

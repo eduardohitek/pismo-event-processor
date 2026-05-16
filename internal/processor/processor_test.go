@@ -12,6 +12,7 @@ import (
 	"github.com/eduardohitek/pismo-event-processor/internal/domain"
 	"github.com/eduardohitek/pismo-event-processor/internal/messaging"
 	"github.com/eduardohitek/pismo-event-processor/internal/storage"
+	"github.com/eduardohitek/pismo-event-processor/internal/triage"
 	"github.com/eduardohitek/pismo-event-processor/internal/validation"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,21 @@ func (f *fakeValidator) Validate(_ []byte) (*domain.Event, error) {
 	return f.result, nil
 }
 
+type fakeTriager struct {
+	routing   *domain.Routing
+	triageErr error
+}
+
+func (f *fakeTriager) Route(_ *domain.Event) (*domain.Routing, error) {
+	if f.triageErr != nil {
+		return nil, f.triageErr
+	}
+	if f.routing != nil {
+		return f.routing, nil
+	}
+	return &domain.Routing{TargetClient: "tenant-A", Category: "transactional", Priority: 1}, nil
+}
+
 type fakeEventStore struct {
 	mu      sync.Mutex
 	saveErr error
@@ -105,10 +121,11 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func newProc(consumer *fakeConsumer, validator *fakeValidator, eventStore *fakeEventStore, quarantineStore *fakeQuarantineStore) *Processor {
+func newProc(consumer *fakeConsumer, validator *fakeValidator, triager *fakeTriager, eventStore *fakeEventStore, quarantineStore *fakeQuarantineStore) *Processor {
 	return New(Config{
 		Consumer:        consumer,
 		Validator:       validator,
+		Triager:         triager,
 		EventStore:      eventStore,
 		QuarantineStore: quarantineStore,
 		Logger:          discardLogger(),
@@ -123,16 +140,18 @@ func testMsg(receiptHandle string) messaging.Message {
 // --- test cases ---
 
 func TestHandleValidEvent(t *testing.T) {
-	event := &domain.Event{ID: "e1", Type: "com.test.v1", TenantID: "tenant-1"}
+	event := &domain.Event{ID: "e1", Type: "com.test.v1", TenantID: "tenant-A"}
 	consumer := &fakeConsumer{}
 	eventStore := &fakeEventStore{}
 	quarantineStore := &fakeQuarantineStore{}
+	routing := &domain.Routing{TargetClient: "tenant-A", Category: "transactional", Priority: 1}
+	triager := &fakeTriager{routing: routing}
 
-	proc := newProc(consumer, &fakeValidator{result: event}, eventStore, quarantineStore)
+	proc := newProc(consumer, &fakeValidator{result: event}, triager, eventStore, quarantineStore)
 	proc.handle(context.Background(), testMsg("rh-1"))
 
 	require.Len(t, eventStore.saved, 1)
-	assert.Equal(t, event, eventStore.saved[0])
+	assert.Equal(t, routing, eventStore.saved[0].Routing)
 	require.Len(t, consumer.ackCalls, 1)
 	assert.Equal(t, "rh-1", consumer.ackCalls[0])
 	assert.Empty(t, quarantineStore.quarantined)
@@ -157,7 +176,36 @@ func TestHandleQuarantineReasons(t *testing.T) {
 			quarantineStore := &fakeQuarantineStore{}
 			ve := &validation.ValidationError{Reason: tc.reason, Detail: tc.detail}
 
-			proc := newProc(consumer, &fakeValidator{valErr: ve}, eventStore, quarantineStore)
+			proc := newProc(consumer, &fakeValidator{valErr: ve}, &fakeTriager{}, eventStore, quarantineStore)
+			proc.handle(context.Background(), testMsg("rh-1"))
+
+			assert.Empty(t, eventStore.saved)
+			require.Len(t, quarantineStore.quarantined, 1)
+			assert.Equal(t, tc.reason, quarantineStore.quarantined[0].Reason)
+			require.Len(t, consumer.ackCalls, 1)
+		})
+	}
+}
+
+func TestHandleTriageErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason domain.QuarantineReason
+		detail string
+	}{
+		{"unregistered tenant", domain.ReasonUnregisteredTenant, "tenant not in allowlist"},
+		{"no routing rule", domain.ReasonNoRoutingRule, "no rule matches event type"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			consumer := &fakeConsumer{}
+			eventStore := &fakeEventStore{}
+			quarantineStore := &fakeQuarantineStore{}
+			event := &domain.Event{ID: "e1", Type: "com.test.v1", TenantID: "tenant-A"}
+			te := &triage.TriageError{Reason: tc.reason, Detail: tc.detail}
+
+			proc := newProc(consumer, &fakeValidator{result: event}, &fakeTriager{triageErr: te}, eventStore, quarantineStore)
 			proc.handle(context.Background(), testMsg("rh-1"))
 
 			assert.Empty(t, eventStore.saved)
@@ -174,7 +222,7 @@ func TestHandleDuplicate(t *testing.T) {
 	eventStore := &fakeEventStore{saveErr: storage.ErrDuplicate}
 	quarantineStore := &fakeQuarantineStore{}
 
-	proc := newProc(consumer, &fakeValidator{result: event}, eventStore, quarantineStore)
+	proc := newProc(consumer, &fakeValidator{result: event}, &fakeTriager{}, eventStore, quarantineStore)
 	proc.handle(context.Background(), testMsg("rh-1"))
 
 	assert.Empty(t, quarantineStore.quarantined)
@@ -188,7 +236,7 @@ func TestHandleTransientError(t *testing.T) {
 	eventStore := &fakeEventStore{saveErr: errors.New("connection refused")}
 	quarantineStore := &fakeQuarantineStore{}
 
-	proc := newProc(consumer, &fakeValidator{result: event}, eventStore, quarantineStore)
+	proc := newProc(consumer, &fakeValidator{result: event}, &fakeTriager{}, eventStore, quarantineStore)
 	proc.handle(context.Background(), testMsg("rh-1"))
 
 	// Critical invariant: transient store errors must NOT trigger an Ack.
@@ -214,6 +262,7 @@ func TestGracefulShutdown(t *testing.T) {
 	proc := New(Config{
 		Consumer:        consumer,
 		Validator:       &fakeValidator{result: event},
+		Triager:         &fakeTriager{},
 		EventStore:      eventStore,
 		QuarantineStore: quarantineStore,
 		Logger:          discardLogger(),

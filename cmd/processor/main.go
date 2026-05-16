@@ -16,6 +16,7 @@ import (
 	"github.com/eduardohitek/pismo-event-processor/internal/messaging"
 	"github.com/eduardohitek/pismo-event-processor/internal/processor"
 	"github.com/eduardohitek/pismo-event-processor/internal/storage"
+	"github.com/eduardohitek/pismo-event-processor/internal/triage"
 	"github.com/eduardohitek/pismo-event-processor/internal/validation"
 )
 
@@ -54,6 +55,11 @@ func main() {
 		log.Fatal("failed to load schemas:", err)
 	}
 
+	triager, err := triage.New(cfg.RoutingConfig)
+	if err != nil {
+		log.Fatal("failed to load routing config:", err)
+	}
+
 	consumer := messaging.NewSQSConsumer(sqsClient, cfg.SQSQueueURL)
 	eventStore := storage.NewEventStore(dynamoClient, cfg.DynamoDBEventsTable)
 	quarantineStore := storage.NewQuarantineStore(dynamoClient, cfg.DynamoDBQuarantineTable)
@@ -61,6 +67,7 @@ func main() {
 	proc := processor.New(processor.Config{
 		Consumer:        consumer,
 		Validator:       validator,
+		Triager:         triager,
 		EventStore:      eventStore,
 		QuarantineStore: quarantineStore,
 		Logger:          logger,

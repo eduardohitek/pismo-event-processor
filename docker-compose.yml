@@ -38,6 +38,7 @@ services:
     command: ["/processor"]
     volumes:
       - ./schemas:/schemas:ro
+      - ./config:/config:ro
     environment:
       SQS_QUEUE_URL: http://localstack:4566/000000000000/events
       DYNAMODB_EVENTS_TABLE: events

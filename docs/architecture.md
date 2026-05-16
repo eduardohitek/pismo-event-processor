@@ -87,6 +87,39 @@ The "no ack on transient error" path is the most critical invariant. SQS redeliv
 
 ---
 
+## Triage: Rule-Based Routing
+
+The Pismo challenge explicitly requires "validating, and **triaging** these events for delivery to various targets." Triage is a distinct pipeline stage — not an extension of validation — because it transforms event metadata into **explicit routing intent** that the Sender service consumes.
+
+Without triage, the Sender would need to re-evaluate tenant + event type on every delivery. With triage, the event record in DynamoDB already carries `routing_target`, `routing_category`, and `routing_priority` — the Sender just reads and delivers.
+
+**Implementation: `internal/triage/RuleBasedTriager`**
+
+Rules are defined in `config/routing.yaml` (loaded at startup, versioned in the repo):
+
+```
+rules:
+  - match.type: exact string or glob ending in .*
+    route.category: label for downstream consumers
+    route.priority: 1 (high) – 3 (low)
+
+default: fallback route (optional)
+registered_tenants: allowlist
+```
+
+The triager applies rules in order; first match wins. A glob `com.pismo.monitoring.*` matches any type with that prefix. If no rule matches and no default is configured, the event is quarantined with `reason=no_routing_rule`.
+
+**Tenant registration** is a separate gate before rule matching: if the event's `subject` (tenant_id) is not in `registered_tenants`, the event is quarantined with `reason=unregistered_tenant`. This separates "unknown tenant" failures from "known tenant, no rule" failures — both are deterministic and permanent.
+
+**Trade-offs accepted:**
+- Rules are static (startup only). Changing rules requires a redeploy. This is intentional simplicity — hot reload or a rule server are valid evolutions but add operational complexity not justified by the challenge scope.
+- No fan-out (1 event → 1 route). Multi-destination delivery is the Sender's responsibility.
+- No expression evaluation on payload fields (e.g. "route if amount > 1000"). A DSL would require a rule engine; the current glob matcher covers the spec.
+
+*Rejected:* embedding routing logic in the Validator — validation determines *correctness*, triage determines *destination*. Conflating them would require the validator to know about tenants and routing topology, breaking single-responsibility.
+
+---
+
 ## Schema Evolution Strategy
 
 The `type` field in a CloudEvent encodes the event type and version: `com.pismo.payment.authorized.v1`. Adding `v2` is:

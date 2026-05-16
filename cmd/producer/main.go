@@ -19,7 +19,7 @@ import (
 
 const paymentAuthorizedV1 = "com.pismo.payment.authorized.v1"
 
-var tenants = []string{"tenant-001", "tenant-002", "tenant-003"}
+var tenants = []string{"tenant-A", "tenant-B", "tenant-C"}
 
 func main() {
 	count := flag.Int("count", 5, "Number of valid events")
@@ -218,7 +218,7 @@ func buildValidEventBytes(id, tenantID string) []byte {
 }
 
 func buildInvalidEventBytes(idx int) []byte {
-	switch idx % 4 {
+	switch idx % 5 {
 	case 0: // invalid JSON
 		return []byte("{not-valid-json}")
 
@@ -239,12 +239,23 @@ func buildInvalidEventBytes(idx int) []byte {
 		b, _ := json.Marshal(e)
 		return b
 
-	default: // case 3: invalid payload (amount violates exclusiveMinimum: 0)
+	case 3: // invalid payload (amount violates exclusiveMinimum: 0)
 		e := baseEvent(paymentAuthorizedV1, tenants[0])
 		e.SetID(ulid.Make().String())
 		_ = e.SetData("application/json", map[string]any{
 			"transaction_id": ulid.Make().String(),
 			"amount":         -1,
+			"currency":       "BRL",
+		})
+		b, _ := json.Marshal(e)
+		return b
+
+	default: // case 4: unregistered tenant (triggers triage quarantine)
+		e := baseEvent(paymentAuthorizedV1, "tenant-unknown")
+		e.SetID(ulid.Make().String())
+		_ = e.SetData("application/json", map[string]any{
+			"transaction_id": ulid.Make().String(),
+			"amount":         randomAmount(),
 			"currency":       "BRL",
 		})
 		b, _ := json.Marshal(e)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -50,9 +51,14 @@ func (e *EventDynamo) Save(ctx context.Context, event *domain.Event) error {
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	// Data is excluded from auto-marshaling (dynamodbav:"-") because DynamoDB
-	// must store it as String, not Binary. Add it manually here.
+	// Data and Routing are excluded from auto-marshaling (dynamodbav:"-").
+	// Data must be stored as String (not Binary); routing fields are stored flat.
 	item["data"] = &types.AttributeValueMemberS{Value: string(event.Data)}
+	if event.Routing != nil {
+		item["routing_target"] = &types.AttributeValueMemberS{Value: event.Routing.TargetClient}
+		item["routing_category"] = &types.AttributeValueMemberS{Value: event.Routing.Category}
+		item["routing_priority"] = &types.AttributeValueMemberN{Value: strconv.Itoa(event.Routing.Priority)}
+	}
 
 	_, err = e.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName:           e.tableName,

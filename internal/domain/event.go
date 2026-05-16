@@ -16,15 +16,24 @@ type Event struct {
 	DataSchema      string          `json:"dataschema"      dynamodbav:"dataschema"`
 	Data            json.RawMessage `json:"data"            dynamodbav:"-"`
 	ReceivedAt      time.Time       `json:"received_at"     dynamodbav:"received_at"`
+	Routing         *Routing        `json:"routing,omitempty" dynamodbav:"-"`
+}
+
+type Routing struct {
+	TargetClient string `json:"target_client" dynamodbav:"target_client"`
+	Category     string `json:"category"      dynamodbav:"category"`
+	Priority     int    `json:"priority"      dynamodbav:"priority"`
 }
 
 type QuarantineReason string
 
 const (
-	ReasonInvalidEnvelope  QuarantineReason = "invalid_envelope"
-	ReasonUnknownEventType QuarantineReason = "unknown_event_type"
-	ReasonInvalidPayload   QuarantineReason = "invalid_payload"
-	ReasonMissingTenant    QuarantineReason = "missing_tenant"
+	ReasonInvalidEnvelope    QuarantineReason = "invalid_envelope"
+	ReasonUnknownEventType   QuarantineReason = "unknown_event_type"
+	ReasonInvalidPayload     QuarantineReason = "invalid_payload"
+	ReasonMissingTenant      QuarantineReason = "missing_tenant"
+	ReasonUnregisteredTenant QuarantineReason = "unregistered_tenant"
+	ReasonNoRoutingRule      QuarantineReason = "no_routing_rule"
 )
 
 type Quarantined struct {

@@ -1,0 +1,21 @@
+rules:
+  - match:
+      type: "com.pismo.payment.authorized.v1"
+    route:
+      category: "transactional"
+      priority: 1
+
+  - match:
+      type: "com.pismo.monitoring.*"
+    route:
+      category: "observability"
+      priority: 3
+
+default:
+  category: "uncategorized"
+  priority: 2
+
+registered_tenants:
+  - tenant-A
+  - tenant-B
+  - tenant-C

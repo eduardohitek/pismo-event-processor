@@ -10,12 +10,14 @@ import (
 	"os"
 	"time"
 
-	cloudevents "github.com/cloudevents/sdk-go/v2"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/oklog/ulid/v2"
 )
+
+const paymentAuthorizedV1 = "com.pismo.payment.authorized.v1"
 
 var tenants = []string{"tenant-001", "tenant-002", "tenant-003"}
 
@@ -40,7 +42,6 @@ Scenarios (--scenario):
 
 	flag.Parse()
 
-	// Detect mutually exclusive flags.
 	var countSet, invalidSet bool
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "count" {
@@ -80,7 +81,7 @@ Scenarios (--scenario):
 
 func runDefault(ctx context.Context, client *sqs.Client, queueURL string, count, invalidCount int) {
 	for i := range count {
-		if err := publish(ctx, client, queueURL, buildValidEventBytes(i)); err != nil {
+		if err := publish(ctx, client, queueURL, buildValidEventBytes("", tenants[i%len(tenants)])); err != nil {
 			log.Printf("publish valid[%d] failed: %v", i, err)
 			continue
 		}
@@ -101,8 +102,7 @@ func runScenario(ctx context.Context, client *sqs.Client, queueURL, name string)
 	case "idempotency":
 		fixedID := ulid.Make().String()
 		for i := range 3 {
-			body, _ := json.Marshal(buildValidEvent(fixedID, tenants[0]))
-			if err := publish(ctx, client, queueURL, body); err != nil {
+			if err := publish(ctx, client, queueURL, buildValidEventBytes(fixedID, tenants[0])); err != nil {
 				log.Printf("publish[%d] failed: %v", i, err)
 			}
 		}
@@ -111,7 +111,7 @@ func runScenario(ctx context.Context, client *sqs.Client, queueURL, name string)
 	case "mixed-load":
 		msgs := make([][]byte, 0, 60)
 		for i := range 50 {
-			msgs = append(msgs, buildValidEventBytes(i))
+			msgs = append(msgs, buildValidEventBytes("", tenants[i%len(tenants)]))
 		}
 		for i := range 10 {
 			msgs = append(msgs, buildInvalidEventBytes(i))
@@ -135,8 +135,9 @@ func runScenario(ctx context.Context, client *sqs.Client, queueURL, name string)
 		}
 		rand.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 		for i, idx := range order {
-			body, _ := json.Marshal(buildValidEvent(ids[idx], tenants[0]))
-			if err := publish(ctx, client, queueURL, body); err != nil {
+			// Each send uses a fresh transaction_id — verifies processor deduplicates
+			// on CloudEvent ID (envelope), not on payload content.
+			if err := publish(ctx, client, queueURL, buildValidEventBytes(ids[idx], tenants[0])); err != nil {
 				log.Printf("publish[%d] failed: %v", i, err)
 			}
 		}
@@ -154,34 +155,47 @@ func runRateMode(ctx context.Context, client *sqs.Client, queueURL string, rate 
 	if err != nil {
 		log.Fatalf("invalid --duration %q: %v", durationStr, err)
 	}
+	dctx, cancel := context.WithDeadline(ctx, time.Now().Add(dur))
+	defer cancel()
+
 	ticker := time.NewTicker(time.Second / time.Duration(rate))
 	defer ticker.Stop()
-	deadline := time.Now().Add(dur)
+
 	var sent int
-	for time.Now().Before(deadline) {
-		<-ticker.C
-		var body []byte
-		if rand.Float64() < errRate {
-			body = buildInvalidEventBytes(sent)
-		} else {
-			body = buildValidEventBytes(sent)
+	for {
+		select {
+		case <-dctx.Done():
+			fmt.Printf("\ndone: sent %d messages at %d msg/s for %s\n", sent, rate, durationStr)
+			return
+		case <-ticker.C:
+			var body []byte
+			if rand.Float64() < errRate {
+				body = buildInvalidEventBytes(sent)
+			} else {
+				body = buildValidEventBytes("", tenants[sent%len(tenants)])
+			}
+			if err := publish(ctx, client, queueURL, body); err != nil {
+				log.Printf("publish failed: %v", err)
+			}
+			sent++
+			fmt.Printf("\rsent: %d", sent)
 		}
-		if err := publish(ctx, client, queueURL, body); err != nil {
-			log.Printf("publish failed: %v", err)
-		}
-		sent++
-		fmt.Printf("\rsent: %d", sent)
 	}
-	fmt.Printf("\ndone: sent %d messages at %d msg/s for %s\n", sent, rate, durationStr)
 }
 
-func buildValidEvent(id, tenantID string) cloudevents.Event {
+// baseEvent creates a CloudEvent with the common fields shared by all event types.
+func baseEvent(eventType, tenantID string) cloudevents.Event {
 	e := cloudevents.NewEvent()
-	e.SetID(id)
-	e.SetType("com.pismo.payment.authorized.v1")
+	e.SetType(eventType)
 	e.SetSource("producer")
 	e.SetSubject(tenantID)
 	e.SetDataContentType("application/json")
+	return e
+}
+
+func buildValidEvent(id, tenantID string) cloudevents.Event {
+	e := baseEvent(paymentAuthorizedV1, tenantID)
+	e.SetID(id)
 	_ = e.SetData("application/json", map[string]any{
 		"transaction_id": ulid.Make().String(),
 		"amount":         randomAmount(),
@@ -190,9 +204,12 @@ func buildValidEvent(id, tenantID string) cloudevents.Event {
 	return e
 }
 
-func buildValidEventBytes(idx int) []byte {
-	e := buildValidEvent(ulid.Make().String(), tenants[idx%len(tenants)])
-	b, _ := json.Marshal(e)
+// buildValidEventBytes marshals a valid CloudEvent. If id is empty, a fresh ULID is generated.
+func buildValidEventBytes(id, tenantID string) []byte {
+	if id == "" {
+		id = ulid.Make().String()
+	}
+	b, _ := json.Marshal(buildValidEvent(id, tenantID))
 	return b
 }
 
@@ -202,11 +219,7 @@ func buildInvalidEventBytes(idx int) []byte {
 		return []byte("{not-valid-json}")
 
 	case 1: // missing required id field
-		e := cloudevents.NewEvent()
-		e.SetType("com.pismo.payment.authorized.v1")
-		e.SetSource("producer")
-		e.SetSubject(tenants[0])
-		e.SetDataContentType("application/json")
+		e := baseEvent(paymentAuthorizedV1, tenants[0])
 		_ = e.SetData("application/json", map[string]any{
 			"transaction_id": ulid.Make().String(),
 			"amount":         randomAmount(),
@@ -216,23 +229,15 @@ func buildInvalidEventBytes(idx int) []byte {
 		return b
 
 	case 2: // unknown event type
-		e := cloudevents.NewEvent()
+		e := baseEvent("com.pismo.unknown.v99", tenants[0])
 		e.SetID(ulid.Make().String())
-		e.SetType("com.pismo.unknown.v99")
-		e.SetSource("producer")
-		e.SetSubject(tenants[0])
-		e.SetDataContentType("application/json")
 		_ = e.SetData("application/json", map[string]any{"foo": "bar"})
 		b, _ := json.Marshal(e)
 		return b
 
 	default: // case 3: invalid payload (amount violates exclusiveMinimum: 0)
-		e := cloudevents.NewEvent()
+		e := baseEvent(paymentAuthorizedV1, tenants[0])
 		e.SetID(ulid.Make().String())
-		e.SetType("com.pismo.payment.authorized.v1")
-		e.SetSource("producer")
-		e.SetSubject(tenants[0])
-		e.SetDataContentType("application/json")
 		_ = e.SetData("application/json", map[string]any{
 			"transaction_id": ulid.Make().String(),
 			"amount":         -1,

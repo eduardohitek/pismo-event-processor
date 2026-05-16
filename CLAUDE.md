@@ -17,7 +17,7 @@ make build              # go build ./...
 make tidy               # go mod tidy
 
 # Local environment (requires Docker)
-make up                 # start LocalStack + Terraform + Processor
+make up                 # start LocalStack + provision via AWS CLI + Processor
 make down               # stop and remove volumes
 make logs               # tail processor logs
 
@@ -81,7 +81,8 @@ SQSConsumer.Receive()
 | `cmd/processor` | Wiring only: config → AWS clients → processor.Run(ctx) |
 | `cmd/producer` | Test tool: publishes valid/invalid events; supports --scenario and --rate |
 | `schemas/payloads/` | JSON Schema files, one per event type, named by type string |
-| `terraform/` | LocalStack infra: SQS + DLQ + 2 DynamoDB tables |
+| `terraform/` | IaC reference schema (not used at runtime; provisioning via scripts/setup.sh) |
+| `scripts/setup.sh` | AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables (~8s) |
 | `test/integration/` | E2E tests (build tag `integration`), assume `make up` already running |
 
 ## Key design decisions

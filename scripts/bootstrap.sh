@@ -1,3 +1,5 @@
 #!/bin/bash
+# Provisions LocalStack resources using the setup service (AWS CLI).
+# Equivalent to: make up
 set -e
-docker compose run --rm terraform sh -c "terraform init && terraform apply -auto-approve"
+docker compose up setup

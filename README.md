@@ -20,7 +20,7 @@ cd pismo-event-processor
 make up && make publish && make inspect
 ```
 
-`make up` builds the processor, provisions LocalStack infrastructure via Terraform, and starts all services. `make publish` sends 5 valid + 2 invalid test events. `make inspect` shows the persisted records in DynamoDB.
+`make up` builds the processor, provisions LocalStack infrastructure via AWS CLI, and starts all services. `make publish` sends 5 valid + 2 invalid test events. `make inspect` shows the persisted records in DynamoDB.
 
 > **Prerequisites:** Docker and Docker Compose. No AWS account or credentials required — everything runs against LocalStack.
 
@@ -28,7 +28,7 @@ make up && make publish && make inspect
 
 | Command | Description |
 |---------|-------------|
-| `make up` | Build processor, apply Terraform (LocalStack), start all services |
+| `make up` | Build processor, provision LocalStack via AWS CLI, start all services |
 | `make down` | Stop all services and remove volumes |
 | `make logs` | Tail processor logs (JSON structured) |
 | `make publish` | Publish 5 valid + 2 invalid events |
@@ -68,6 +68,14 @@ PostgreSQL would require schema migration tooling, an explicit idempotency mecha
 
 *Trade-off accepted:* no ordering by tenant. A `PK=tenant_id, SK=event_id` design enables tenant-scoped queries but creates hot partitions for high-volume tenants. Global ordering is not required here.
 
+### AWS CLI vs Terraform for LocalStack provisioning
+
+The `terraform-provider-aws` has a hardcoded propagation waiter for SQS: after `CreateQueue`, it polls `GetQueueAttributes` every 5 seconds for ~25 seconds per queue — a delay designed for real AWS where attribute changes replicate slowly. LocalStack creates resources instantly but the provider ignores that, burning ~50 seconds on polling for two queues alone.
+
+AWS CLI (`scripts/setup.sh`) has no such waiter: all four resources (DLQ, events queue, events table, quarantine table) are created in ~8 seconds. The `terraform/` directory is kept as an IaC reference for the resource schema; it is not used at runtime.
+
+*Rejected for local dev:* Terraform — correct tool for production IaC, wrong tool when provider waiters add 7× overhead against an in-process mock.
+
 ## Resilience Model
 
 | Failure type | Action | Guarantee |
@@ -106,12 +114,14 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 │   └── integration/        # E2E tests (build tag: integration); require make up
 ├── schemas/
 │   └── payloads/           # JSON Schema files, one per event type, named by type string
-├── terraform/              # SQS + DLQ + 2 DynamoDB tables provisioned against LocalStack
+├── terraform/              # IaC reference (schema of resources; not used at runtime — see scripts/setup.sh)
+├── scripts/
+│   └── setup.sh            # AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables (~8s vs ~60s with Terraform)
 ├── docs/
 │   ├── architecture.md     # Design decisions in depth
 │   ├── resilience.md       # Pipeline failure analysis
 │   └── sender-design.md    # Proposed Sender service design (out of scope)
-├── docker-compose.yml      # LocalStack + Terraform + Processor
+├── docker-compose.yml      # LocalStack + setup (AWS CLI) + Processor
 ├── Dockerfile              # Multi-stage: go:1.26-alpine builder → distroless runtime
 └── Makefile                # All operational commands
 ```
@@ -135,4 +145,4 @@ Each version maps to a separate JSON Schema file in `schemas/payloads/`. The pro
 | **Simplicity** | stdlib-only flags and logging (`log/slog`), no framework, no ORM, ~1200 lines of production Go |
 | **Testability** | Manual fakes (no mock framework), 8 unit test cases covering all error-routing branches, 5 integration E2E cases |
 | **Documentation** | This README (10 sections), `docs/architecture.md`, `docs/resilience.md`, `docs/sender-design.md` |
-| **Reproducibility** | `make up` — Docker + Terraform + LocalStack — full running system from a single command |
+| **Reproducibility** | `make up` — Docker + AWS CLI + LocalStack — full running system from a single command |

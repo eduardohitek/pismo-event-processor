@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	eventsTable     = "events"
-	quarantineTable = "quarantined_events"
-	knownEventType  = "com.pismo.payment.authorized.v1"
+	eventsTable         = "events"
+	quarantineTable     = "quarantined_events"
+	knownEventType      = "com.pismo.payment.authorized.v1"
+	monitoringEventType = "com.pismo.monitoring.heartbeat.v1"
 )
 
 var (
@@ -317,17 +318,10 @@ func TestMixedValidInvalid(t *testing.T) {
 func TestMonitoringEvent(t *testing.T) {
 	clearTables(t)
 
-	e := cloudevents.NewEvent()
-	e.SetID(ulid.Make().String())
-	e.SetType("com.pismo.monitoring.heartbeat.v1")
-	e.SetSource("integration-test")
-	e.SetSubject("tenant-A")
-	e.SetDataContentType("application/json")
-	_ = e.SetData("application/json", map[string]any{
+	publishEvent(t, baseEvent(ulid.Make().String(), monitoringEventType, map[string]any{
 		"service_name": "processor",
 		"status":       "ok",
-	})
-	publishEvent(t, marshal(e))
+	}))
 
 	eventuallyAssert(t, func() bool {
 		return countRecords(t, eventsTable) == 1

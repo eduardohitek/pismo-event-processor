@@ -140,16 +140,3 @@ type mockDynamo struct {
 Integration tests use `eventuallyAssert(t, predicate func() bool, timeout, msg)` with 100ms polling — required because SQS consumption is async.
 
 Call `clearTables(t)` at the start of each integration test for isolated state.
-
-## Implementation order
-
-See `Plans/` directory for the 7 sub-plans:
-1. `Plans/01-foundation.md` — domain types + config
-2. `Plans/02-infra.md` — Docker + Terraform + Makefile
-3. `Plans/03-validation.md` — CloudEvents + JSON Schema validation
-4. `Plans/04-storage-messaging.md` — DynamoDB + SQS clients
-5. `Plans/05-processor-wiring.md` — orchestration + cmd/processor
-6. `Plans/06-producer.md` — test producer + Makefile completion
-7. `Plans/07-tests-docs.md` — integration tests + README + docs/
-
-Each sub-plan must compile and pass tests before the next begins.

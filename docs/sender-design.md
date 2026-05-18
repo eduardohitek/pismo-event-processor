@@ -39,7 +39,7 @@ resource "aws_lambda_event_source_mapping" "sender" {
   batch_size                    = 10
   maximum_retry_attempts        = 3
   bisect_batch_on_function_error = true
-  report_batch_item_failures    = true
+  function_response_types        = ["ReportBatchItemFailures"]
 
   destination_config {
     on_failure {
@@ -57,7 +57,7 @@ Key settings:
 | `batch_size` | 10 | Balance throughput vs blast radius on failure |
 | `maximum_retry_attempts` | 3 | Transient failures get 3 retries before going to DLQ |
 | `bisect_batch_on_function_error` | `true` | On batch failure, splits the batch to isolate the poison message |
-| `report_batch_item_failures` | `true` | Lambda can mark individual items as failed, retrying only those |
+| `function_response_types` | `["ReportBatchItemFailures"]` | Lambda can mark individual items as failed, retrying only those |
 | `on_failure.destination_arn` | SQS DLQ | Unprocessable events are preserved for inspection |
 
 ---

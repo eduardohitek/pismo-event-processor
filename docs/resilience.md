@@ -25,7 +25,13 @@ This document maps every stage of the pipeline to its failure modes, mitigations
     │
     ├─ ValidationError ──► QuarantineStore.Save() + Ack
     │
-    └─ *domain.Event ──► EventStore.Save()
+    ├─► RuleBasedTriager.Route()
+    │       ├── tenant allowlist check (registered_tenants in routing.yaml)
+    │       └── rule match by type (exact or glob *.*)
+    │
+    ├─ TriageError ──► QuarantineStore.Save() + Ack
+    │
+    └─ *domain.Routing ──► EventStore.Save()
             ├── ErrDuplicate (ConditionalCheckFailedException) ──► Ack only
             ├── Transient error ──► NO Ack (SQS redelivers)
             └── Success ──► Ack
@@ -43,6 +49,8 @@ This document maps every stage of the pipeline to its failure modes, mitigations
 | Network error on `SendMessage` | AWS SDK retries with exponential backoff | Transient: recovered automatically |
 | SQS endpoint unavailable | SDK retries; producer logs error | Short outage: messages buffered at producer if retry implemented |
 | Duplicate `SendMessage` (producer retried after success) | `id` field in CloudEvent is idempotency key; processor deduplicates | Duplicate enters queue; processor acks second occurrence without saving |
+
+> **Retry policy note:** the producer relies on AWS SDK v2's default retry mode (`standard`: up to 3 attempts with exponential backoff for retryable errors). For production deployment, this would be tuned per-environment via `RetryMaxAttempts` and `RetryMode` config options, with environment-specific values for staging vs production.
 
 ### 2. SQS Queue
 
@@ -72,7 +80,17 @@ This document maps every stage of the pipeline to its failure modes, mitigations
 
 All validation failures are **deterministic** — retrying will produce the same result. Acking after quarantine is correct; SQS redelivery would loop indefinitely without it.
 
-### 5. Processor: Storage (EventStore)
+### 5. Processor: Triage
+
+| Failure | Mitigation | Residual risk |
+|---|---|---|
+| Tenant not in `registered_tenants` | `QuarantineStore.Save()` + Ack; `reason=unregistered_tenant` | Permanent; fix: add tenant to `config/routing.yaml` and redeploy |
+| No rule matches event type (and no default) | Same; `reason=no_routing_rule` | Permanent; fix: add rule or default route to `config/routing.yaml` |
+| Routing config file missing at startup | Process exits (fail-fast) | Service will not start — mount `./config:/config:ro` volume |
+
+All triage failures are **deterministic** — retrying will produce the same result. Acking after quarantine is correct.
+
+### 6. Processor: Storage (EventStore)
 
 | Failure | Mitigation | Residual risk |
 |---|---|---|
@@ -80,14 +98,14 @@ All validation failures are **deterministic** — retrying will produce the same
 | Transient DynamoDB error (throttling, network) | **No Ack** — SQS redelivers after 30s | Up to 5 redeliveries; message goes to DLQ if all fail |
 | DynamoDB table deleted | Transient error path; messages pile up in DLQ | Operator intervention required |
 
-### 6. Processor: Ack (DeleteMessage)
+### 7. Processor: Ack (DeleteMessage)
 
 | Failure | Mitigation | Residual risk |
 |---|---|---|
 | `DeleteMessage` fails after successful save | Message redelivered; duplicate `PutItem` rejected by condition | Ack logged as error; no data loss |
 | `DeleteMessage` fails after quarantine save | Same message redelivered; processor validates again, quarantines again (idempotent since `quarantined_events` overwrites on same PK) | No data loss |
 
-### 7. Graceful Shutdown (SIGTERM)
+### 8. Graceful Shutdown (SIGTERM)
 
 | Failure | Mitigation | Residual risk |
 |---|---|---|

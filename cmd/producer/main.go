@@ -17,7 +17,10 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-const paymentAuthorizedV1 = "com.pismo.payment.authorized.v1"
+const (
+	paymentAuthorizedV1   = "com.pismo.payment.authorized.v1"
+	monitoringHeartbeatV1 = "com.pismo.monitoring.heartbeat.v1"
+)
 
 var tenants = []string{"tenant-A", "tenant-B", "tenant-C"}
 
@@ -81,8 +84,14 @@ Scenarios (--scenario):
 
 func runDefault(ctx context.Context, client *sqs.Client, queueURL string, count, invalidCount int) {
 	for i := range count {
-		err := publish(ctx, client, queueURL, buildValidEventBytes("", tenants[i%len(tenants)]))
-		if err != nil {
+		tenant := tenants[i%len(tenants)]
+		var body []byte
+		if i%2 == 0 {
+			body = buildValidEventBytes("", tenant)
+		} else {
+			body = buildMonitoringEventBytes("", tenant)
+		}
+		if err := publish(ctx, client, queueURL, body); err != nil {
 			log.Printf("publish valid[%d] failed: %v", i, err)
 			continue
 		}
@@ -208,13 +217,31 @@ func buildValidEvent(id, tenantID string) cloudevents.Event {
 	return e
 }
 
-// buildValidEventBytes marshals a valid CloudEvent. If id is empty, a fresh ULID is generated.
-func buildValidEventBytes(id, tenantID string) []byte {
+func buildEventBytes(id, tenantID string, buildFn func(string, string) cloudevents.Event) []byte {
 	if id == "" {
 		id = ulid.Make().String()
 	}
-	b, _ := json.Marshal(buildValidEvent(id, tenantID))
+	b, _ := json.Marshal(buildFn(id, tenantID))
 	return b
+}
+
+func buildValidEventBytes(id, tenantID string) []byte {
+	return buildEventBytes(id, tenantID, buildValidEvent)
+}
+
+func buildMonitoringEvent(id, tenantID string) cloudevents.Event {
+	e := baseEvent(monitoringHeartbeatV1, tenantID)
+	e.SetID(id)
+	statuses := []string{"ok", "degraded", "down"}
+	_ = e.SetData("application/json", map[string]any{
+		"service_name": "processor",
+		"status":       statuses[rand.Intn(len(statuses))],
+	})
+	return e
+}
+
+func buildMonitoringEventBytes(id, tenantID string) []byte {
+	return buildEventBytes(id, tenantID, buildMonitoringEvent)
 }
 
 func buildInvalidEventBytes(idx int) []byte {

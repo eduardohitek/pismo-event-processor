@@ -47,6 +47,8 @@ services:
       AWS_ENDPOINT_URL: http://localstack:4566
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
+      SCHEMAS_DIR: /schemas/payloads
+      ROUTING_CONFIG: /config/routing.yaml
       PROCESSOR_WORKERS: 5
       SHUTDOWN_GRACE_PERIOD: 30s
     depends_on:

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "com.pismo.monitoring.heartbeat.v1",
+  "type": "object",
+  "required": ["service_name", "status"],
+  "properties": {
+    "service_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "degraded", "down"]
+    }
+  },
+  "additionalProperties": false
+}

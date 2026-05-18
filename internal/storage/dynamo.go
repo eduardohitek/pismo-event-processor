@@ -88,7 +88,6 @@ func (q *QuarantineDynamo) Save(ctx context.Context, quarantined *domain.Quarant
 	if quarantined.EventID == "" {
 		quarantined.EventID = ulid.Make().String()
 	}
-
 	item, err := attributevalue.MarshalMap(quarantined)
 	if err != nil {
 		return fmt.Errorf("marshal quarantined: %w", err)

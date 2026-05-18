@@ -314,6 +314,38 @@ func TestMixedValidInvalid(t *testing.T) {
 	}, 20*time.Second, "5 valid + 3 quarantined")
 }
 
+func TestMonitoringEvent(t *testing.T) {
+	clearTables(t)
+
+	e := cloudevents.NewEvent()
+	e.SetID(ulid.Make().String())
+	e.SetType("com.pismo.monitoring.heartbeat.v1")
+	e.SetSource("integration-test")
+	e.SetSubject("tenant-A")
+	e.SetDataContentType("application/json")
+	_ = e.SetData("application/json", map[string]any{
+		"service_name": "processor",
+		"status":       "ok",
+	})
+	publishEvent(t, marshal(e))
+
+	eventuallyAssert(t, func() bool {
+		return countRecords(t, eventsTable) == 1
+	}, 10*time.Second, "monitoring event should be persisted")
+
+	items := scanTable(t, eventsTable)
+	item := items[0]
+
+	routingCategory, _ := item["routing_category"].(*types.AttributeValueMemberS)
+	routingPriority, _ := item["routing_priority"].(*types.AttributeValueMemberN)
+
+	require.NotNil(t, routingCategory, "routing_category should be present")
+	require.NotNil(t, routingPriority, "routing_priority should be present")
+	assert.Equal(t, "observability", routingCategory.Value)
+	assert.Equal(t, "3", routingPriority.Value)
+	assert.Equal(t, 0, countRecords(t, quarantineTable))
+}
+
 func TestTriageQuarantine(t *testing.T) {
 	clearTables(t)
 

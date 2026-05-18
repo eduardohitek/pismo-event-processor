@@ -10,16 +10,40 @@ Producer ──► SQS Queue ──► Processor ──► DynamoDB (events)
                 └─► DLQ (after 5 failures)
 ```
 
-**Pipeline per message:** `Receive → Validate → Triage → Persist`
+**Internal pipeline (per message):**
+
+```
+                              Event Processor
+                  ┌──────────────────────────────────────────┐
+SQS ─► Receive ─► │ Validate ─► Triage ─► Persist ─► Ack     │ ─► DynamoDB (events)
+                  │     │           │                         │
+                  │     └───────────┴──► QuarantineStore.Save │ ─► DynamoDB (quarantined_events)
+                  └──────────────────────────────────────────┘
+```
 
 The processor runs N parallel workers (default: 5). Each worker receives a message, validates the CloudEvent envelope and payload, triages it against routing rules, and persists to DynamoDB. Validation failures and triage failures are quarantined and acked; transient storage errors are not acked (SQS redelivers after `VisibilityTimeout=30s`).
+
+## Pipeline Stages
+
+Every message flows through four explicit stages. Each stage has a single responsibility, distinct error semantics, and observable boundaries in the structured logs (`stage` field).
+
+**Receive.** The processor long-polls SQS (20s wait, batch of up to 10) and pulls messages onto an in-process channel. Messages remain invisible to other workers for `VisibilityTimeout=30s` — long enough to complete the rest of the pipeline. If the processor crashes before acknowledging, SQS automatically redelivers.
+
+**Validate.** Two-layer validation: first the CloudEvents v1.0 envelope (required fields, format constraints) using the official SDK; then the typed payload against the JSON Schema registered for that event type. Failures here are *deterministic* — retrying with the same input produces the same result — so failures are quarantined and acknowledged, not redelivered.
+
+**Triage.** This is the stage that transforms event metadata into explicit routing intent. The `RuleBasedTriager` checks the tenant against an allowlist, then matches the event type against ordered rules from `config/routing.yaml`. The result — `target_client`, `category`, `priority` — is attached to the event before persistence. The Sender service downstream reads these fields directly from DynamoDB Streams without re-evaluating rules. Triage failures (unregistered tenant, no matching rule) are quarantined like validation failures.
+
+**Persist.** A single `PutItem` to DynamoDB with `ConditionExpression: attribute_not_exists(id)`. This is the core idempotency mechanism: duplicate messages from at-least-once delivery are rejected at the database level, returning `ConditionalCheckFailedException`, which the processor treats as success (the message is acknowledged without re-saving). Transient errors (throttling, network) are *not* acknowledged — SQS redelivers, and the DLQ catches messages that fail repeatedly.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/eduardohitek/pismo-event-processor
 cd pismo-event-processor
-make up && make publish && make inspect
+
+make up          # ~30s — LocalStack + infra (CLI) + processor up
+make publish     # publishes 5 valid + 2 invalid events
+make inspect     # expect 5 rows in `events`, 2 in `quarantined_events`
 ```
 
 `make up` builds the processor, provisions LocalStack infrastructure via AWS CLI, and starts all services. `make publish` sends 5 valid + 2 invalid test events. `make inspect` shows the persisted records in DynamoDB.
@@ -72,13 +96,20 @@ PostgreSQL would require schema migration tooling, an explicit idempotency mecha
 
 *Trade-off accepted:* no ordering by tenant. A `PK=tenant_id, SK=event_id` design enables tenant-scoped queries but creates hot partitions for high-volume tenants. Global ordering is not required here.
 
-### AWS CLI vs Terraform for LocalStack provisioning
+### Provisioning: AWS CLI script, not Terraform
 
-The `terraform-provider-aws` has a hardcoded propagation waiter for SQS: after `CreateQueue`, it polls `GetQueueAttributes` every 5 seconds for ~25 seconds per queue — a delay designed for real AWS where attribute changes replicate slowly. LocalStack creates resources instantly but the provider ignores that, burning ~50 seconds on polling for two queues alone.
+The challenge brief notes that "an Infrastructure as Code solution will be welcome." This implementation deliberately uses an AWS CLI script (`scripts/setup.sh`) instead, and documents the trade-off explicitly.
 
-AWS CLI (`scripts/setup.sh`) has no such waiter: all four resources (DLQ, events queue, events table, quarantine table) are created in ~8 seconds.
+**The friction:** `terraform-provider-aws` has built-in propagation waiters for SQS — after `CreateQueue`, it polls `GetQueueAttributes` every 5 seconds for ~25 seconds per queue to confirm attribute consistency. This delay is correct for real AWS, where SQS attributes propagate asynchronously across the regional control plane. Against LocalStack, where resources are created synchronously in-process, the waiters add no safety — only latency. Two queues plus two tables: ~50s vs ~8s with the CLI. For a reviewer running `make up` once, this is the difference between a smooth first impression and an awkward wait.
 
-*Rejected for local dev:* Terraform — correct tool for production IaC, wrong tool when provider waiters add 7× overhead against an in-process mock.
+**What's being traded:**
+
+- *Lost:* declarative state management, `terraform destroy` for clean teardown, drift detection, and (importantly for the brief's intent) demonstration of IaC fluency in a familiar form.
+- *Kept:* deterministic, repeatable provisioning. The script is idempotent (re-runnable without errors), version-controlled, and documents the resources as code — just in bash + AWS CLI rather than HCL.
+
+**When this decision flips:** for any deployment beyond LocalStack — staging, production, or shared developer environments on real AWS — Terraform (or CDK, or CloudFormation) is the correct choice. The trade-off here is scoped to the LocalStack iteration loop. A production-bound version of this service would have `terraform/` as the source of truth.
+
+**Verdict:** in a case evaluated on Reproducibility and Simplicity (two of the six official criteria), faster setup with equivalent declarativeness beats slower setup with theoretical state tracking against a mock backend.
 
 ## Resilience Model
 
@@ -113,6 +144,8 @@ Triage rules live in `config/routing.yaml` and are loaded at startup. The file d
 Each matched event is enriched with three DynamoDB attributes: `routing_target` (the tenant ID), `routing_category`, and `routing_priority`. The Sender service reads these fields from DynamoDB Streams to route events to their destinations without re-evaluating rules.
 
 To add support for a new event type or tenant, update `config/routing.yaml` and redeploy. No code change required.
+
+The path to this file is configured via the `ROUTING_CONFIG` env var (default: `/config/routing.yaml`). In Docker Compose the file is mounted from `./config:/config:ro`.
 
 ## Project Layout
 
@@ -153,9 +186,11 @@ To add support for a new event type or tenant, update `config/routing.yaml` and 
 
 **Outbox pattern for producer:** In production, the publisher would use an outbox table in its own database to guarantee exactly-once publishing, decoupling event creation from SQS delivery.
 
-**Dynamic routing rules:** Current rules are static YAML loaded at startup. A future evolution could support hot reload (INOTIFY watch or config server) or a rule expression engine for complex predicates (e.g. amount-based routing).
+**Dynamic routing rules:** The current rules are static YAML loaded at startup — a deliberate choice for the case scope (Simplicity is a stated evaluation criterion). Future evolutions could add hot reload (inotify watch or config server poll) or a rule expression engine for payload-conditional routing (e.g. "route if amount > 1000"). Both add operational complexity not justified by the current requirements.
 
 **Observability:** Structured JSON logs are already in place with `stage` field per pipeline step. Next: Prometheus counters (`events_processed_total`, `events_quarantined_total`), latency histograms, and OpenTelemetry traces for end-to-end pipeline visibility.
+
+**Terraform for production deployment:** The current provisioning uses AWS CLI for LocalStack speed (see *Provisioning* section above). A production deployment would replace `scripts/setup.sh` with a `terraform/` module — same resources, same configuration, but with state management and CI-driven plan/apply. The CLI script's idempotency design means the transition is mechanical, not structural.
 
 ## Evaluation Criteria
 
@@ -163,7 +198,7 @@ To add support for a new event type or tenant, update `config/routing.yaml` and 
 |---|---|
 | **Problem Understanding** | Correct error routing (transient vs deterministic), at-least-once + idempotent consumer, DLQ after 5 retries, CloudEvents envelope |
 | **Maintainability** | Package-per-concern in `internal/`, interfaces defined at the consumer side (Go convention), no circular dependencies, explicit error types |
-| **Simplicity** | stdlib-only flags and logging (`log/slog`), no framework, no ORM, ~1200 lines of production Go |
-| **Testability** | Manual fakes (no mock framework), 8 unit test cases covering all error-routing branches, 5 integration E2E cases |
+| **Simplicity** | stdlib-only flags and logging (`log/slog`), no framework, no ORM, compact production codebase (~1k lines, no framework, stdlib + minimal deps) |
+| **Testability** | Manual fakes (no mock framework), unit tests covering all error-routing branches in validator, triager, and processor; end-to-end integration tests covering happy path, quarantine paths, and idempotency. Test coverage >70% on `internal/` packages. |
 | **Documentation** | This README (10 sections), `docs/architecture.md`, `docs/resilience.md`, `docs/sender-design.md` |
 | **Reproducibility** | `make up` — Docker + AWS CLI + LocalStack — full running system from a single command |

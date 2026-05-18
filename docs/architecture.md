@@ -37,9 +37,11 @@ Schemas are compiled at startup (`jsonschema.NewCompiler().Compile(path)`). Star
 Events are keyed by `id` (the CloudEvent `id` field), which producers are expected to generate as a ULID.
 
 **ULID properties relevant here:**
-- **Monotonically increasing** (millisecond precision prefix): DynamoDB writes sort lexicographically within a small time window, reducing write amplification on the B-tree index.
-- **Globally unique without coordination**: producers generate IDs independently.
-- **Idempotency key**: the DynamoDB conditional write `attribute_not_exists(id)` uses this key to reject duplicate events. If a producer retries after a network timeout (not knowing if the first message was received), the second write is rejected without data corruption.
+- **Globally unique without coordination:** producers generate IDs independently, no central allocator needed.
+- **Lexicographically sortable by creation time:** useful for any future GSI keyed by time (e.g. for time-range queries on the events table), and produces human-debuggable IDs that preserve creation order in logs.
+- **Idempotency key:** the DynamoDB conditional write `attribute_not_exists(id)` uses this key to reject duplicate events. If a producer retries after a network timeout (not knowing if the first message was received), the second write is rejected without data corruption.
+
+For the current single-table design with `id` as partition key, DynamoDB distributes writes by hash, so ULID's monotonic property gives no advantage over UUID for write distribution. The choice of ULID over UUID is forward-looking: when a GSI on `(tenant_id, created_at)` or similar is added for query patterns, the time-sortable property pays off.
 
 The quarantine table uses `event_id` as its key, with a fallback to `ulid.Make()` for events whose envelope was unparseable (so the `id` field couldn't be extracted).
 
@@ -69,6 +71,16 @@ The native DynamoDB Streams support is particularly important: it provides the e
 - **Idempotent consumer**: the conditional write ensures only the first successful write for a given `id` persists. Subsequent writes for the same `id` are rejected with `ConditionalCheckFailedException` and the message is acked without error.
 
 This combination provides exactly-once persistence semantics for the happy path, while handling the full retry/redelivery lifecycle correctly.
+
+---
+
+## Provisioning Strategy
+
+AWS CLI for local development; Terraform (or equivalent) for production.
+
+The CLI choice optimizes for the LocalStack iteration loop. The `terraform-provider-aws` SQS resource has a hardcoded propagation waiter (`GetQueueAttributes` polling every 5s for ~25s per queue) that is correct against real AWS but pure overhead against an in-process mock. For two queues and two tables, this adds ~50s to every `make up` — without providing any safety benefit in this context.
+
+The `scripts/setup.sh` is idempotent, version-controlled, and documents the four resources as code. It serves the same purpose as Terraform within this scope (declarative resource definition), at a fraction of the latency. The trade-off inverts for any deployment beyond LocalStack — see the README *Provisioning* section for the full analysis.
 
 ---
 

@@ -88,9 +88,10 @@ func (p *Processor) ack(ctx context.Context, msg messaging.Message, attrs ...any
 
 func (p *Processor) quarantine(ctx context.Context, msg messaging.Message, reason domain.QuarantineReason, detail, stage string) {
 	q := &domain.Quarantined{
-		Reason:     reason,
-		Detail:     detail,
-		RawMessage: msg.Body,
+		Reason:        reason,
+		Detail:        detail,
+		RawMessage:    msg.Body,
+		QuarantinedAt: time.Now(),
 	}
 	if err := p.cfg.QuarantineStore.Save(ctx, q); err != nil {
 		p.cfg.Logger.Error("quarantine save failed", "message_id", msg.ID, "error", err)

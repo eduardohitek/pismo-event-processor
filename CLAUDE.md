@@ -17,7 +17,7 @@ make build              # go build ./...
 make tidy               # go mod tidy
 
 # Local environment (requires Docker)
-make up                 # start LocalStack + provision via AWS CLI + Processor
+make up                 # start LocalStack + provision via AWS CLI + Processor + DynamoDB Admin UI (http://localhost:8001)
 make down               # stop and remove volumes
 make logs               # tail processor logs
 
@@ -62,25 +62,31 @@ SQSConsumer.Receive()
               ├── event type lookup in compiled schemas
               └── JSON Schema validation of data payload
          ├── ValidationError → QuarantineStore.Save() + Ack
-         └── *domain.Event → EventStore.Save()
-                  ├── ErrDuplicate (ConditionalCheckFailedException) → Ack only
-                  ├── Transient error → NO Ack (SQS redelivers)
-                  └── Success → Ack
+         └── *domain.Event → RuleBasedTriager.Route()
+                  ├── tenant allowlist check (registered_tenants)
+                  └── rule match by type (exact or glob *.*)
+              ├── TriageError → QuarantineStore.Save() + Ack
+              └── *domain.Routing → EventStore.Save()
+                       ├── ErrDuplicate (ConditionalCheckFailedException) → Ack only
+                       ├── Transient error → NO Ack (SQS redelivers)
+                       └── Success → Ack
 ```
 
 ## Package structure
 
 | Package | Role |
 |---------|------|
-| `internal/domain` | Pure types: `Event`, `Quarantined`, `QuarantineReason` constants |
+| `internal/domain` | Pure types: `Event`, `Routing`, `Quarantined`, `QuarantineReason` constants |
 | `internal/config` | `Load() (*Config, error)` — env vars only, no files |
 | `internal/validation` | `Validator` interface + `SchemaValidator` (CloudEvents + JSON Schema) |
+| `internal/triage` | `RuleBasedTriager`: loads `config/routing.yaml`, routes events by tenant + type |
 | `internal/storage` | `EventStore` + `QuarantineStore` interfaces + DynamoDB impls; `ErrDuplicate` sentinel |
 | `internal/messaging` | `Consumer` interface + `SQSConsumer`; `Message` type |
-| `internal/processor` | Orchestrates receive→validate→persist; N workers + graceful shutdown |
+| `internal/processor` | Orchestrates receive→validate→triage→persist; N workers + graceful shutdown |
 | `cmd/processor` | Wiring only: config → AWS clients → processor.Run(ctx) |
 | `cmd/producer` | Test tool: publishes valid/invalid events; supports --scenario and --rate |
 | `schemas/payloads/` | JSON Schema files, one per event type, named by type string |
+| `config/routing.yaml` | Triage rules: type matchers, category/priority, registered tenants |
 | `scripts/setup.sh` | AWS CLI provisioning: SQS + DLQ + 2 DynamoDB tables (~8s) |
 | `test/integration/` | E2E tests (build tag `integration`), assume `make up` already running |
 
@@ -109,6 +115,8 @@ SQSConsumer.Receive()
 | `DYNAMODB_QUARANTINE_TABLE` | yes | — |
 | `AWS_REGION` | no | `us-east-1` |
 | `AWS_ENDPOINT_URL` | no | `""` (real AWS when empty) |
+| `SCHEMAS_DIR` | no | `/schemas/payloads` |
+| `ROUTING_CONFIG` | no | `/config/routing.yaml` |
 | `PROCESSOR_WORKERS` | no | `5` |
 | `SHUTDOWN_GRACE_PERIOD` | no | `30s` |
 
@@ -116,7 +124,7 @@ For local development against LocalStack: `AWS_ACCESS_KEY_ID=test`, `AWS_SECRET_
 
 ## DynamoDB schema
 
-**`events` table:** PK `id` (String, ULID), stream `NEW_IMAGE`, `PAY_PER_REQUEST`. Field `data` stored as String (raw JSON), not as DynamoDB map.
+**`events` table:** PK `id` (String, ULID), stream `NEW_IMAGE`, `PAY_PER_REQUEST`. Field `data` stored as String (raw JSON), not as DynamoDB map. Routing fields stored flat: `routing_target` (String), `routing_category` (String), `routing_priority` (Number).
 
 **`quarantined_events` table:** PK `event_id` (String). Fallback: if `event_id` is empty (unparseable envelope), generate a ULID via `ulid.Make()`.
 

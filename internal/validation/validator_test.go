@@ -8,6 +8,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/eduardohitek/pismo-event-processor/internal/domain"
+	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,8 +35,8 @@ const (
 func makeValidator(t *testing.T) *SchemaValidator {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "com.pismo.payment.authorized.v1.json")
-	require.NoError(t, os.WriteFile(path, []byte(paymentSchema), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "com.pismo.payment.authorized.v1.json"), []byte(paymentSchema), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "com.pismo.monitoring.heartbeat.v1.json"), []byte(monitoringSchema), 0600))
 	v, err := New(dir)
 	require.NoError(t, err)
 	return v
@@ -133,6 +134,70 @@ func TestValidate(t *testing.T) {
 				assert.False(t, event.ReceivedAt.IsZero())
 			} else {
 				require.Nil(t, event)
+				require.Error(t, err)
+				var ve *ValidationError
+				require.True(t, errors.As(err, &ve))
+				assert.Equal(t, tc.wantReason, ve.Reason)
+			}
+		})
+	}
+}
+
+const monitoringSchema = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "com.pismo.monitoring.heartbeat.v1",
+  "type": "object",
+  "required": ["service_name", "status"],
+  "properties": {
+    "service_name": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["ok", "degraded", "down"]}
+  },
+  "additionalProperties": false
+}`
+
+func TestValidateMonitoringHeartbeat(t *testing.T) {
+	cases := []struct {
+		name       string
+		payload    map[string]any
+		wantReason domain.QuarantineReason
+	}{
+		{
+			name:    "valid heartbeat ok",
+			payload: map[string]any{"service_name": "processor", "status": "ok"},
+		},
+		{
+			name:    "valid heartbeat degraded",
+			payload: map[string]any{"service_name": "api-gateway", "status": "degraded"},
+		},
+		{
+			name:       "missing service_name",
+			payload:    map[string]any{"status": "ok"},
+			wantReason: domain.ReasonInvalidPayload,
+		},
+		{
+			name:       "invalid status value",
+			payload:    map[string]any{"service_name": "processor", "status": "unknown"},
+			wantReason: domain.ReasonInvalidPayload,
+		},
+		{
+			name:       "extra field",
+			payload:    map[string]any{"service_name": "processor", "status": "ok", "extra": "field"},
+			wantReason: domain.ReasonInvalidPayload,
+		},
+	}
+
+	v := makeValidator(t)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mustBuildEvent(ulid.Make().String(), "com.pismo.monitoring.heartbeat.v1", defaultSubject, tc.payload)
+			event, err := v.Validate(raw)
+
+			if tc.wantReason == "" {
+				require.NoError(t, err)
+				require.NotNil(t, event)
+				assert.Equal(t, "com.pismo.monitoring.heartbeat.v1", event.Type)
+			} else {
 				require.Error(t, err)
 				var ve *ValidationError
 				require.True(t, errors.As(err, &ve))
